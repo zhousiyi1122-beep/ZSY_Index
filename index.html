@@ -247,8 +247,35 @@ function setApiUrl(url){
 let state = { transactions: [], merchants: [], settings: null };
 let currentView = 'dashboard';
 let apiReady = false;
+let editingMerchantId = null;
+let editingCategory = null;
+let editingMethod = null;
+let editingCardId = null;
 
 function uid(){ return Date.now().toString(36) + Math.random().toString(36).slice(2,7); }
+
+/* ============ Cards ============ */
+function getCards(){ return state.settings.cards || []; }
+function findCard(name){ return getCards().find(c=>c.name===name); }
+function isCardMethod(name){ return !!findCard(name); }
+function allPaymentMethodOptions(){ return [...(state.settings.paymentMethods||[]), ...getCards().map(c=>c.name)]; }
+
+// One-off migration: older data had a single "Credit Card" payment method
+// with one shared closing day / limit. Turn that into a proper card entry.
+async function migrateLegacyCardIfNeeded(){
+  if(state.settings.cards !== undefined) return;
+  const legacyMethods = state.settings.paymentMethods || [];
+  const hadLegacyCard = legacyMethods.includes('Credit Card');
+  const cards = hadLegacyCard ? [{
+    id: uid(),
+    name: 'Credit Card',
+    closingDay: state.settings.closingDay || 15,
+    creditLimit: state.settings.creditLimit!==undefined ? state.settings.creditLimit : null
+  }] : [];
+  const paymentMethods = legacyMethods.filter(m=>m!=='Credit Card');
+  const data = await apiPost('saveSettings', { data: { cards, paymentMethods } });
+  applyData(data);
+}
 
 /* ============ API layer (Google Sheets via Apps Script) ============ */
 function setSync(status){ // 'ok' | 'busy' | 'bad'
@@ -401,31 +428,41 @@ function renderHeader(){
   document.getElementById('hdr-balance-label').textContent = 'balance since ' + fmtDate(state.settings.openingBalanceDate || todayStr());
 
   const now = todayStr();
-  const closingDay = state.settings.closingDay || 15;
-  const end = periodEndFor(now, closingDay);
-  const daysLeft = Math.round((end - new Date(now+'T00:00:00')) / 86400000);
-  const key = periodKeyFor(now, closingDay);
-  const ccSpend = state.transactions.filter(t => t.paymentMethod==='Credit Card' && periodKeyFor(t.date, closingDay)===key)
-    .reduce((s,t)=>s+t.amount,0);
-  const unreconciled = state.transactions.filter(t => t.paymentMethod==='Credit Card' && !t.reconciled).length;
+  const cards = getCards();
+  const cardStats = cards.map(c=>{
+    const key = periodKeyFor(now, c.closingDay||15);
+    const end = periodEndFor(now, c.closingDay||15);
+    const daysLeft = Math.round((end - new Date(now+'T00:00:00')) / 86400000);
+    const spend = state.transactions.filter(t => t.paymentMethod===c.name && periodKeyFor(t.date, c.closingDay||15)===key)
+      .reduce((s,t)=>s+t.amount,0);
+    return { card:c, key, daysLeft, spend };
+  });
+  const unreconciled = state.transactions.filter(t => isCardMethod(t.paymentMethod) && !t.reconciled).length;
 
-  let statsHtml = `<div class="stat-chip"><b>${fmtMoney(ccSpend)}</b> current CC statement</div>`;
-  statsHtml += `<div class="stat-chip${daysLeft<=3?' warn':''}"><b>${daysLeft}d</b> to close (${fmtDate(key)})</div>`;
-  if(unreconciled>0) statsHtml += `<div class="stat-chip warn"><b>${unreconciled}</b> unreconciled</div>`;
-  if(state.settings.creditLimit){
-    const over = ccSpend > state.settings.creditLimit;
-    statsHtml += `<div class="stat-chip${over?' bad':''}"><b>${fmtMoney(state.settings.creditLimit - ccSpend)}</b> limit headroom</div>`;
+  let statsHtml = '';
+  if(cardStats.length){
+    // Lead with whichever card closes soonest.
+    const soonest = [...cardStats].sort((a,b)=>a.daysLeft-b.daysLeft)[0];
+    statsHtml += `<div class="stat-chip"><b>${fmtMoney(soonest.spend)}</b> ${escapeHtml(soonest.card.name)} statement</div>`;
+    statsHtml += `<div class="stat-chip${soonest.daysLeft<=3?' warn':''}"><b>${soonest.daysLeft}d</b> to close (${fmtDate(soonest.key)})</div>`;
+    if(cardStats.length>1) statsHtml += `<div class="stat-chip">${cardStats.length} cards</div>`;
+    if(soonest.card.creditLimit){
+      const over = soonest.spend > soonest.card.creditLimit;
+      statsHtml += `<div class="stat-chip${over?' bad':''}"><b>${fmtMoney(soonest.card.creditLimit - soonest.spend)}</b> ${escapeHtml(soonest.card.name)} headroom</div>`;
+    }
   }
+  if(unreconciled>0) statsHtml += `<div class="stat-chip warn"><b>${unreconciled}</b> unreconciled</div>`;
   document.getElementById('hdr-substats').innerHTML = statsHtml;
 }
 
 /* ============ Dashboard ============ */
 function viewDashboard(){
   const now = todayStr();
-  const closingDay = state.settings.closingDay || 15;
+  const cards = getCards();
   const monthTxns = state.transactions.filter(t => t.date.slice(0,7) === now.slice(0,7));
+  const methodList = allPaymentMethodOptions();
   const byMethod = {};
-  (state.settings.paymentMethods||[]).forEach(m => byMethod[m] = 0);
+  methodList.forEach(m => byMethod[m] = 0);
   monthTxns.forEach(t => byMethod[t.paymentMethod] = (byMethod[t.paymentMethod]||0) + t.amount);
 
   const byCat = {};
@@ -433,13 +470,10 @@ function viewDashboard(){
   const catEntries = Object.entries(byCat).sort((a,b)=>b[1]-a[1]);
   const maxCat = catEntries.length ? catEntries[0][1] : 1;
 
-  const key = periodKeyFor(now, closingDay);
-  const periodRec = (state.settings.periods||{})[key];
-
-  let methodCards = (state.settings.paymentMethods||[]).map(m => `
+  let methodCards = methodList.map(m => `
     <div class="metric">
       <div class="v">${fmtMoney(byMethod[m]||0)}</div>
-      <div class="l">${m}</div>
+      <div class="l">${escapeHtml(m)}</div>
     </div>`).join('');
 
   let catBars = catEntries.length ? catEntries.map(([cat,amt])=>`
@@ -448,6 +482,26 @@ function viewDashboard(){
       <div class="catbar-track"><div class="catbar-fill" style="width:${Math.max(4,(amt/maxCat*100))}%"></div></div>
       <div class="amt">${fmtMoney(amt)}</div>
     </div>`).join('') : `<div class="empty">No transactions logged this month yet.</div>`;
+
+  const cardSections = cards.map(c=>{
+    const key = periodKeyFor(now, c.closingDay||15);
+    const spend = state.transactions.filter(t=>t.paymentMethod===c.name && periodKeyFor(t.date, c.closingDay||15)===key)
+      .reduce((s,t)=>s+t.amount,0);
+    const periodRec = ((state.settings.periods||{})[c.id]||{})[key];
+    return `
+      <div class="card">
+        <div class="card-title">${escapeHtml(c.name)} — current statement</div>
+        <div style="display:flex;justify-content:space-between;align-items:center;">
+          <div>
+            <div style="font-size:14px;font-weight:600;">${periodLabel(key)}</div>
+            <div class="helptext" style="margin-top:4px;">Closes ${fmtDate(key)}</div>
+          </div>
+          <div class="mono" style="font-size:18px;font-weight:600;">${fmtMoney(spend)}</div>
+        </div>
+        ${c.creditLimit ? `<div class="helptext" style="margin-top:8px;">${fmtMoney(c.creditLimit - spend)} of ${fmtMoney(c.creditLimit)} limit remaining</div>` : ''}
+        ${periodRec && periodRec.closed ? `<div class="helptext" style="color:var(--money);margin-top:8px;">Reconciled against statement of ${fmtMoney(periodRec.actualTotal)}</div>` : ''}
+      </div>`;
+  }).join('');
 
   return `
     <div class="card">
@@ -463,24 +517,14 @@ function viewDashboard(){
       <div class="card-title">Spend by category — this month</div>
       ${catBars}
     </div>
-    <div class="card">
-      <div class="card-title">Current statement period</div>
-      <div style="display:flex;justify-content:space-between;align-items:center;">
-        <div>
-          <div style="font-size:14px;font-weight:600;">${periodLabel(key)}</div>
-          <div class="helptext" style="margin-top:4px;">Closes ${fmtDate(key)}</div>
-        </div>
-        <div class="mono" style="font-size:18px;font-weight:600;">${fmtMoney(byMethod['Credit Card']||0)}</div>
-      </div>
-      ${periodRec && periodRec.closed ? `<div class="helptext" style="color:var(--money);margin-top:8px;">Reconciled against statement of ${fmtMoney(periodRec.actualTotal)}</div>` : ''}
-    </div>
+    ${cardSections}
   `;
 }
 
 /* ============ Add Transaction ============ */
 function viewAdd(){
   const cats = state.settings.categories||[];
-  const methods = state.settings.paymentMethods||[];
+  const methods = allPaymentMethodOptions();
   const merchantOptions = state.merchants.map(m=>`<option value="${escapeHtml(m.name)}">`).join('');
   return `
     <div class="card">
@@ -536,7 +580,7 @@ function viewLog(){
         </div>
         <div class="txn-right">
           <div class="amt">${fmtMoney(t.amount)}</div>
-          ${t.paymentMethod==='Credit Card' ? `<div class="rec ${t.reconciled?'yes':'no'}">${t.reconciled?'reconciled':'pending'}</div>` : ''}
+          ${isCardMethod(t.paymentMethod) ? `<div class="rec ${t.reconciled?'yes':'no'}">${t.reconciled?'reconciled':'pending'}</div>` : ''}
         </div>
       </div>`;
   });
@@ -549,7 +593,7 @@ function viewEditTxn(id){
   const t = state.transactions.find(x=>String(x.id)===String(id));
   if(!t) return `<div class="card"><div class="empty">Transaction not found.</div></div>`;
   const cats = state.settings.categories||[];
-  const methods = state.settings.paymentMethods||[];
+  const methods = allPaymentMethodOptions();
   return `
     <div class="card">
       <div class="card-title">Edit transaction</div>
@@ -587,57 +631,74 @@ function viewEditTxn(id){
 
 /* ============ Reconcile ============ */
 function viewReconcile(){
-  const closingDay = state.settings.closingDay || 15;
-  const ccTxns = state.transactions.filter(t => t.paymentMethod === 'Credit Card');
-  if(!ccTxns.length){
-    return `<div class="card"><div class="empty">No credit card transactions logged yet. Reconciliation groups credit card entries into monthly statement periods based on your closing date.</div></div>`;
+  const cards = getCards();
+  if(!cards.length){
+    return `<div class="card"><div class="empty">No credit cards set up yet. Add one in Settings → Credit cards, then log some transactions against it to reconcile.</div></div>`;
   }
-  const periods = {};
-  ccTxns.forEach(t=>{
-    const key = periodKeyFor(t.date, closingDay);
-    (periods[key] = periods[key] || []).push(t);
-  });
-  const keys = Object.keys(periods).sort().reverse();
 
-  let html = '';
-  keys.forEach(key=>{
-    const txns = periods[key].sort((a,b)=>a.date.localeCompare(b.date));
-    const total = txns.reduce((s,t)=>s+t.amount,0);
-    const recCount = txns.filter(t=>t.reconciled).length;
-    const pr = (state.settings.periods||{})[key];
-    const closed = pr && pr.closed;
-    const actual = pr ? pr.actualTotal : null;
-    html += `
-      <div class="period-card" data-period="${key}">
-        <div class="period-head">
-          <div class="title">${periodLabel(key)}</div>
-          <div class="status-badge ${closed?'closed':'open'}">${closed?'closed':'open'}</div>
-        </div>
-        <div class="helptext">${recCount}/${txns.length} matched \u2014 logged total ${fmtMoney(total)}</div>
-        ${txns.map(t=>`
-          <div class="recon-row">
-            <input type="checkbox" class="recon-check" data-id="${t.id}" ${t.reconciled?'checked':''}>
-            <div class="rv">${escapeHtml(t.vendor)} \u00b7 ${fmtDate(t.date)}</div>
-            <div class="ra mono">${fmtMoney(t.amount)}</div>
+  return cards.map(card=>{
+    const closingDay = card.closingDay || 15;
+    const cardTxns = state.transactions.filter(t => t.paymentMethod === card.name);
+    if(!cardTxns.length){
+      return `
+        <div class="card">
+          <div class="card-title">${escapeHtml(card.name)}</div>
+          <div class="empty">No transactions logged against this card yet.</div>
+        </div>`;
+    }
+    const periods = {};
+    cardTxns.forEach(t=>{
+      const key = periodKeyFor(t.date, closingDay);
+      (periods[key] = periods[key] || []).push(t);
+    });
+    const keys = Object.keys(periods).sort().reverse();
+
+    const periodsHtml = keys.map(key=>{
+      const txns = periods[key].sort((a,b)=>a.date.localeCompare(b.date));
+      const total = txns.reduce((s,t)=>s+t.amount,0);
+      const recCount = txns.filter(t=>t.reconciled).length;
+      const pr = ((state.settings.periods||{})[card.id]||{})[key];
+      const closed = pr && pr.closed;
+      const actual = pr ? pr.actualTotal : null;
+      const pid = card.id + '__' + key;
+      return `
+        <div class="period-card" data-card="${card.id}" data-period="${key}">
+          <div class="period-head">
+            <div class="title">${periodLabel(key)}</div>
+            <div class="status-badge ${closed?'closed':'open'}">${closed?'closed':'open'}</div>
           </div>
-        `).join('')}
-        <div class="variance">
-          <label for="actual-${key}" style="margin:0 0 6px;">Actual statement total</label>
-          <input type="number" step="0.01" class="mono actual-input" id="actual-${key}" data-period="${key}" placeholder="Enter amount from statement" value="${actual!==null && actual!==undefined ? actual : ''}">
-          <div id="variance-${key}" class="helptext" style="margin-top:8px;"></div>
-          <button type="button" class="btn secondary close-period-btn" data-period="${key}" style="margin-top:12px;">${closed?'Reopen period':'Mark statement reconciled'}</button>
-        </div>
-      </div>`;
-  });
-  return html;
+          <div class="helptext">${recCount}/${txns.length} matched \u2014 logged total ${fmtMoney(total)}</div>
+          ${txns.map(t=>`
+            <div class="recon-row">
+              <input type="checkbox" class="recon-check" data-id="${t.id}" ${t.reconciled?'checked':''}>
+              <div class="rv">${escapeHtml(t.vendor)} \u00b7 ${fmtDate(t.date)}</div>
+              <div class="ra mono">${fmtMoney(t.amount)}</div>
+            </div>
+          `).join('')}
+          <div class="variance">
+            <label for="actual-${pid}" style="margin:0 0 6px;">Actual statement total</label>
+            <input type="number" step="0.01" class="mono actual-input" id="actual-${pid}" data-card="${card.id}" data-period="${key}" placeholder="Enter amount from statement" value="${actual!==null && actual!==undefined ? actual : ''}">
+            <div id="variance-${pid}" class="helptext" style="margin-top:8px;"></div>
+            <button type="button" class="btn secondary close-period-btn" data-card="${card.id}" data-period="${key}" style="margin-top:12px;">${closed?'Reopen period':'Mark statement reconciled'}</button>
+          </div>
+        </div>`;
+    }).join('');
+
+    return `
+      <div class="card-title" style="margin:4px 0 -2px 2px;">${escapeHtml(card.name)}</div>
+      ${periodsHtml}
+    `;
+  }).join('');
 }
 
-function updateVarianceDisplay(key){
-  const input = document.getElementById('actual-'+key);
-  const disp = document.getElementById('variance-'+key);
+function updateVarianceDisplay(cardId, key){
+  const pid = cardId + '__' + key;
+  const input = document.getElementById('actual-'+pid);
+  const disp = document.getElementById('variance-'+pid);
   if(!input || !disp) return;
-  const closingDay = state.settings.closingDay || 15;
-  const txns = state.transactions.filter(t=>t.paymentMethod==='Credit Card' && periodKeyFor(t.date,closingDay)===key);
+  const card = getCards().find(c=>c.id===cardId);
+  const closingDay = card ? (card.closingDay||15) : 15;
+  const txns = state.transactions.filter(t=>t.paymentMethod===(card?card.name:null) && periodKeyFor(t.date,closingDay)===key);
   const total = txns.reduce((s,t)=>s+t.amount,0);
   const actual = parseFloat(input.value);
   if(isNaN(actual)){ disp.textContent=''; return; }
@@ -664,29 +725,68 @@ function viewSettings(){
     </div>
 
     <div class="card">
-      <div class="card-title">Statement closing date</div>
-      <label for="s-closing">Day of month the credit card statement closes</label>
-      <input type="number" id="s-closing" class="mono" min="1" max="28" value="${s.closingDay||15}">
-      <div class="helptext">Used to group credit card transactions into monthly statement periods for reconciliation.</div>
-
-      <label for="s-limit">Credit limit (optional)</label>
-      <input type="number" id="s-limit" class="mono" step="0.01" min="0" placeholder="e.g. 10000" value="${s.creditLimit!==null && s.creditLimit!==undefined ? s.creditLimit : ''}">
-      <div class="helptext">Shown on the dashboard as headroom remaining in the current statement period.</div>
-
-      <button class="btn" id="save-settings-btn">Save settings</button>
+      <div class="card-title">Credit cards</div>
+      <div class="helptext" style="margin-bottom:10px;">Each card gets its own closing date, credit limit, and reconciliation periods. A card's name doubles as its payment method — pick it in Add/Edit just like Cash or Afterpay.</div>
+      ${getCards().length ? getCards().map(c=> c.id===editingCardId ? `
+        <div class="list-row" style="display:block;padding-bottom:14px;">
+          <label for="ecard-name-${c.id}">Card name</label>
+          <input type="text" id="ecard-name-${c.id}" value="${escapeHtml(c.name)}">
+          <label for="ecard-closing-${c.id}">Day of month statement closes</label>
+          <input type="number" id="ecard-closing-${c.id}" class="mono" min="1" max="28" value="${c.closingDay||15}">
+          <label for="ecard-limit-${c.id}">Credit limit (optional)</label>
+          <input type="number" id="ecard-limit-${c.id}" class="mono" step="0.01" min="0" placeholder="e.g. 10000" value="${c.creditLimit!==null && c.creditLimit!==undefined ? c.creditLimit : ''}">
+          <div class="row-flex" style="margin-top:14px;">
+            <button class="btn" style="margin-top:0;" data-save-card="${c.id}">Save</button>
+            <button class="btn secondary" style="margin-top:0;" data-cancel-card>Cancel</button>
+          </div>
+        </div>` : `
+        <div class="list-row">
+          <div>
+            <div class="n">${escapeHtml(c.name)}</div>
+            <div class="m">Closes on the ${c.closingDay||15}${c.creditLimit?` \u00b7 limit ${fmtMoney(c.creditLimit)}`:''}</div>
+          </div>
+          <div>
+            <button class="x-btn" data-edit-card="${c.id}" style="color:var(--ink-dim);">&#9998;</button>
+            <button class="x-btn" data-remove-card="${c.id}">&times;</button>
+          </div>
+        </div>`).join('') : `<div class="empty">No credit cards yet — add one below.</div>`}
+      <div style="margin-top:14px;">
+        <label for="nc-name">Card name</label>
+        <input type="text" id="nc-name" placeholder="e.g. Amex Business">
+        <label for="nc-closing">Day of month statement closes</label>
+        <input type="number" id="nc-closing" class="mono" min="1" max="28" value="15">
+        <label for="nc-limit">Credit limit (optional)</label>
+        <input type="number" id="nc-limit" class="mono" step="0.01" min="0" placeholder="e.g. 10000">
+        <button class="btn secondary" id="add-card-btn" style="margin-top:14px;">Add card</button>
+      </div>
     </div>
 
     <div class="card">
       <div class="card-title">Merchants</div>
       <div class="helptext" style="margin-bottom:10px;">New vendors are added automatically when you log a transaction. Manage or pre-configure them here.</div>
       <div id="merchant-list-ui">
-        ${state.merchants.length ? state.merchants.map(m=>`
+        ${state.merchants.length ? state.merchants.map(m=> m.id===editingMerchantId ? `
+          <div class="list-row" style="display:block;padding-bottom:14px;">
+            <label for="em-name-${m.id}">Vendor name</label>
+            <input type="text" id="em-name-${m.id}" value="${escapeHtml(m.name)}">
+            <label for="em-category-${m.id}">Default category</label>
+            <select id="em-category-${m.id}">${(s.categories||[]).map(c=>`<option value="${escapeHtml(c)}"${c===m.category?' selected':''}>${escapeHtml(c)}</option>`).join('')}</select>
+            <label for="em-method-${m.id}">Default payment method</label>
+            <select id="em-method-${m.id}">${allPaymentMethodOptions().map(p=>`<option value="${escapeHtml(p)}"${p===m.paymentMethod?' selected':''}>${escapeHtml(p)}</option>`).join('')}</select>
+            <div class="row-flex" style="margin-top:14px;">
+              <button class="btn" style="margin-top:0;" data-save-merchant="${m.id}">Save</button>
+              <button class="btn secondary" style="margin-top:0;" data-cancel-merchant>Cancel</button>
+            </div>
+          </div>` : `
           <div class="list-row">
             <div>
               <div class="n">${escapeHtml(m.name)}</div>
               <div class="m">${escapeHtml(m.category)} \u00b7 ${escapeHtml(m.paymentMethod)}</div>
             </div>
-            <button class="x-btn" data-remove-merchant="${m.id}">&times;</button>
+            <div>
+              <button class="x-btn" data-edit-merchant="${m.id}" style="color:var(--ink-dim);">&#9998;</button>
+              <button class="x-btn" data-remove-merchant="${m.id}">&times;</button>
+            </div>
           </div>`).join('') : `<div class="empty">No merchants configured yet.</div>`}
       </div>
       <div style="margin-top:14px;">
@@ -695,16 +795,28 @@ function viewSettings(){
         <label for="nm-category">Default category</label>
         <select id="nm-category">${(s.categories||[]).map(c=>`<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('')}</select>
         <label for="nm-method">Default payment method</label>
-        <select id="nm-method">${(s.paymentMethods||[]).map(m=>`<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join('')}</select>
+        <select id="nm-method">${allPaymentMethodOptions().map(m=>`<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join('')}</select>
         <button class="btn secondary" id="add-merchant-btn" style="margin-top:14px;">Add merchant</button>
       </div>
     </div>
 
     <div class="card">
       <div class="card-title">Categories</div>
-      ${(s.categories||[]).map(c=>`
-        <div class="list-row"><div class="n">${escapeHtml(c)}</div><button class="x-btn" data-remove-category="${escapeHtml(c)}">&times;</button></div>
-      `).join('')}
+      ${(s.categories||[]).map(c=> c===editingCategory ? `
+        <div class="list-row" style="display:block;padding-bottom:14px;">
+          <input type="text" id="ec-input" value="${escapeHtml(c)}">
+          <div class="row-flex" style="margin-top:10px;">
+            <button class="btn" style="margin-top:0;" data-save-category="${escapeHtml(c)}">Save</button>
+            <button class="btn secondary" style="margin-top:0;" data-cancel-category>Cancel</button>
+          </div>
+        </div>` : `
+        <div class="list-row">
+          <div class="n">${escapeHtml(c)}</div>
+          <div>
+            <button class="x-btn" data-edit-category="${escapeHtml(c)}" style="color:var(--ink-dim);">&#9998;</button>
+            <button class="x-btn" data-remove-category="${escapeHtml(c)}">&times;</button>
+          </div>
+        </div>`).join('')}
       <div class="chip-add">
         <input type="text" id="new-category-input" placeholder="New category">
         <button id="add-category-btn">Add</button>
@@ -713,13 +825,26 @@ function viewSettings(){
 
     <div class="card">
       <div class="card-title">Payment methods</div>
-      ${(s.paymentMethods||[]).map(m=>`
-        <div class="list-row"><div class="n">${escapeHtml(m)}</div><button class="x-btn" data-remove-method="${escapeHtml(m)}">&times;</button></div>
-      `).join('')}
+      ${(s.paymentMethods||[]).map(m=> m===editingMethod ? `
+        <div class="list-row" style="display:block;padding-bottom:14px;">
+          <input type="text" id="epm-input" value="${escapeHtml(m)}">
+          <div class="row-flex" style="margin-top:10px;">
+            <button class="btn" style="margin-top:0;" data-save-method="${escapeHtml(m)}">Save</button>
+            <button class="btn secondary" style="margin-top:0;" data-cancel-method>Cancel</button>
+          </div>
+        </div>` : `
+        <div class="list-row">
+          <div class="n">${escapeHtml(m)}</div>
+          <div>
+            <button class="x-btn" data-edit-method="${escapeHtml(m)}" style="color:var(--ink-dim);">&#9998;</button>
+            <button class="x-btn" data-remove-method="${escapeHtml(m)}">&times;</button>
+          </div>
+        </div>`).join('')}
       <div class="chip-add">
         <input type="text" id="new-method-input" placeholder="New payment method">
         <button id="add-method-btn">Add</button>
       </div>
+      <div class="helptext" style="margin-top:10px;">Cards are managed separately above — this list is for non-card methods like Cash, Afterpay, or Bank Transfer.</div>
     </div>
 
     <div class="card">
@@ -765,7 +890,7 @@ function attachHandlers(){
       const date = document.getElementById('f-date').value;
       const vendor = document.getElementById('f-vendor').value.trim();
       const amount = parseFloat(document.getElementById('f-amount').value);
-      const method = document.querySelector('#f-method-group .pill.active')?.dataset.value || (state.settings.paymentMethods||[])[0];
+      const method = document.querySelector('#f-method-group .pill.active')?.dataset.value || allPaymentMethodOptions()[0];
       const category = document.querySelector('#f-category-group .pill.active')?.dataset.value || (state.settings.categories||[])[0];
       const notes = document.getElementById('f-notes').value.trim();
       if(!vendor || isNaN(amount)) return;
@@ -812,17 +937,20 @@ function attachHandlers(){
       });
     });
     document.querySelectorAll('.actual-input').forEach(inp=>{
-      inp.addEventListener('input', ()=> updateVarianceDisplay(inp.dataset.period));
-      updateVarianceDisplay(inp.dataset.period);
+      inp.addEventListener('input', ()=> updateVarianceDisplay(inp.dataset.card, inp.dataset.period));
+      updateVarianceDisplay(inp.dataset.card, inp.dataset.period);
     });
     document.querySelectorAll('.close-period-btn').forEach(btn=>{
       btn.addEventListener('click', async ()=>{
+        const cardId = btn.dataset.card;
         const key = btn.dataset.period;
-        const input = document.getElementById('actual-'+key);
+        const pid = cardId + '__' + key;
+        const input = document.getElementById('actual-'+pid);
         const actual = parseFloat(input.value);
-        const isClosed = state.settings.periods && state.settings.periods[key] && state.settings.periods[key].closed;
+        const cardPeriods = (state.settings.periods||{})[cardId] || {};
+        const isClosed = cardPeriods[key] && cardPeriods[key].closed;
         const periods = Object.assign({}, state.settings.periods);
-        periods[key] = { closed: !isClosed, actualTotal: isNaN(actual)?null:actual };
+        periods[cardId] = Object.assign({}, cardPeriods, { [key]: { closed: !isClosed, actualTotal: isNaN(actual)?null:actual } });
         try{
           const data = await apiPost('saveSettings', { data: { periods } });
           applyData(data);
@@ -848,18 +976,52 @@ function attachHandlers(){
       }catch(err){ setSync('bad'); showToast('Could not save', true); }
     });
 
-    document.getElementById('save-settings-btn').addEventListener('click', async ()=>{
-      const cd = parseInt(document.getElementById('s-closing').value, 10);
-      const limitRaw = document.getElementById('s-limit').value;
+    document.getElementById('add-card-btn').addEventListener('click', async ()=>{
+      const name = document.getElementById('nc-name').value.trim();
+      if(!name) return;
+      if(getCards().some(c=>c.name===name) || (state.settings.paymentMethods||[]).includes(name)){
+        showToast('That name is already in use'); return;
+      }
+      const closingDay = parseInt(document.getElementById('nc-closing').value, 10) || 15;
+      const limitRaw = document.getElementById('nc-limit').value;
       try{
-        const data = await apiPost('saveSettings', { data: {
-          closingDay: (cd>=1 && cd<=28) ? cd : state.settings.closingDay,
-          creditLimit: limitRaw === '' ? null : parseFloat(limitRaw)
-        }});
+        const data = await apiPost('addCard', { data: { name, closingDay, creditLimit: limitRaw==='' ? null : parseFloat(limitRaw) } });
         applyData(data);
-        showToast('Settings saved');
+        showToast('Card added');
         render();
       }catch(err){ setSync('bad'); showToast('Could not save', true); }
+    });
+    document.querySelectorAll('[data-edit-card]').forEach(btn=>{
+      btn.addEventListener('click', ()=>{ editingCardId = btn.dataset.editCard; render(); });
+    });
+    document.querySelectorAll('[data-cancel-card]').forEach(btn=>{
+      btn.addEventListener('click', ()=>{ editingCardId = null; render(); });
+    });
+    document.querySelectorAll('[data-save-card]').forEach(btn=>{
+      btn.addEventListener('click', async ()=>{
+        const id = btn.dataset.saveCard;
+        const name = document.getElementById(`ecard-name-${id}`).value.trim();
+        const closingDay = parseInt(document.getElementById(`ecard-closing-${id}`).value, 10) || 15;
+        const limitRaw = document.getElementById(`ecard-limit-${id}`).value;
+        if(!name) return;
+        try{
+          const data = await apiPost('updateCard', { data: { id, name, closingDay, creditLimit: limitRaw==='' ? null : parseFloat(limitRaw) } });
+          applyData(data);
+          editingCardId = null;
+          showToast('Card updated');
+          render();
+        }catch(err){ setSync('bad'); showToast('Could not save', true); }
+      });
+    });
+    document.querySelectorAll('[data-remove-card]').forEach(btn=>{
+      btn.addEventListener('click', async ()=>{
+        try{
+          const data = await apiPost('deleteCard', { id: btn.dataset.removeCard });
+          applyData(data);
+          showToast('Card removed');
+          render();
+        }catch(err){ setSync('bad'); showToast('Could not delete', true); }
+      });
     });
 
     document.getElementById('add-merchant-btn').addEventListener('click', async ()=>{
@@ -884,6 +1046,28 @@ function attachHandlers(){
         }catch(err){ setSync('bad'); showToast('Could not delete', true); }
       });
     });
+    document.querySelectorAll('[data-edit-merchant]').forEach(btn=>{
+      btn.addEventListener('click', ()=>{ editingMerchantId = btn.dataset.editMerchant; render(); });
+    });
+    document.querySelectorAll('[data-cancel-merchant]').forEach(btn=>{
+      btn.addEventListener('click', ()=>{ editingMerchantId = null; render(); });
+    });
+    document.querySelectorAll('[data-save-merchant]').forEach(btn=>{
+      btn.addEventListener('click', async ()=>{
+        const id = btn.dataset.saveMerchant;
+        const name = document.getElementById(`em-name-${id}`).value.trim();
+        const category = document.getElementById(`em-category-${id}`).value;
+        const paymentMethod = document.getElementById(`em-method-${id}`).value;
+        if(!name) return;
+        try{
+          const data = await apiPost('updateMerchant', { data: { id, name, category, paymentMethod } });
+          applyData(data);
+          editingMerchantId = null;
+          showToast('Merchant updated');
+          render();
+        }catch(err){ setSync('bad'); showToast('Could not save', true); }
+      });
+    });
 
     document.getElementById('add-category-btn').addEventListener('click', async ()=>{
       const v = document.getElementById('new-category-input').value.trim();
@@ -905,6 +1089,27 @@ function attachHandlers(){
         }catch(err){ setSync('bad'); showToast('Could not save', true); }
       });
     });
+    document.querySelectorAll('[data-edit-category]').forEach(btn=>{
+      btn.addEventListener('click', ()=>{ editingCategory = btn.dataset.editCategory; render(); });
+    });
+    document.querySelectorAll('[data-cancel-category]').forEach(btn=>{
+      btn.addEventListener('click', ()=>{ editingCategory = null; render(); });
+    });
+    document.querySelectorAll('[data-save-category]').forEach(btn=>{
+      btn.addEventListener('click', async ()=>{
+        const oldName = btn.dataset.saveCategory;
+        const newName = document.getElementById('ec-input').value.trim();
+        if(!newName){ return; }
+        if(newName === oldName){ editingCategory = null; render(); return; }
+        try{
+          const data = await apiPost('renameCategory', { oldName, newName });
+          applyData(data);
+          editingCategory = null;
+          showToast('Category renamed');
+          render();
+        }catch(err){ setSync('bad'); showToast('Could not save', true); }
+      });
+    });
 
     document.getElementById('add-method-btn').addEventListener('click', async ()=>{
       const v = document.getElementById('new-method-input').value.trim();
@@ -922,6 +1127,27 @@ function attachHandlers(){
         try{
           const data = await apiPost('saveSettings', { data: { paymentMethods } });
           applyData(data);
+          render();
+        }catch(err){ setSync('bad'); showToast('Could not save', true); }
+      });
+    });
+    document.querySelectorAll('[data-edit-method]').forEach(btn=>{
+      btn.addEventListener('click', ()=>{ editingMethod = btn.dataset.editMethod; render(); });
+    });
+    document.querySelectorAll('[data-cancel-method]').forEach(btn=>{
+      btn.addEventListener('click', ()=>{ editingMethod = null; render(); });
+    });
+    document.querySelectorAll('[data-save-method]').forEach(btn=>{
+      btn.addEventListener('click', async ()=>{
+        const oldName = btn.dataset.saveMethod;
+        const newName = document.getElementById('epm-input').value.trim();
+        if(!newName){ return; }
+        if(newName === oldName){ editingMethod = null; render(); return; }
+        try{
+          const data = await apiPost('renamePaymentMethod', { oldName, newName });
+          applyData(data);
+          editingMethod = null;
+          showToast('Payment method renamed');
           render();
         }catch(err){ setSync('bad'); showToast('Could not save', true); }
       });
@@ -1029,6 +1255,7 @@ if('serviceWorker' in navigator){
   setSync('busy');
   try{
     await refreshFromApi();
+    await migrateLegacyCardIfNeeded();
     setSync('ok');
     render();
   }catch(err){
