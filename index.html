@@ -231,11 +231,17 @@
 
 <script>
 /* ============================================================
-   CONFIG — paste your Apps Script web app URL here after you
-   deploy Code.gs (Deploy -> New deployment -> Web app -> copy
-   the URL ending in /exec).
+   CONFIG — the Apps Script web app URL is entered in-app (setup
+   screen on first run, or Settings > Data source afterwards) and
+   kept in this browser's localStorage. Nothing to edit in source.
    ============================================================ */
-const API_URL = 'PASTE_YOUR_APPS_SCRIPT_WEB_APP_URL_HERE';
+let API_URL = localStorage.getItem('ledger_api_url') || '';
+
+function setApiUrl(url){
+  API_URL = url.trim();
+  if(API_URL) localStorage.setItem('ledger_api_url', API_URL);
+  else localStorage.removeItem('ledger_api_url');
+}
 
 /* ============ State ============ */
 let state = { transactions: [], merchants: [], settings: null };
@@ -718,7 +724,10 @@ function viewSettings(){
 
     <div class="card">
       <div class="card-title">Data source</div>
-      <div class="helptext">This app reads and writes a Google Sheet through the Apps Script deployment configured at the top of index.html. Open the Sheet directly any time to see the raw data.</div>
+      <label for="s-api-url">Google Sheet connection (Apps Script URL)</label>
+      <input type="url" id="s-api-url" placeholder="https://script.google.com/macros/s/…/exec" value="${API_URL}">
+      <div class="helptext">This app reads and writes a Google Sheet through this Apps Script deployment. Open the Sheet directly any time to see the raw data.</div>
+      <button class="btn secondary" id="save-api-url-btn">Update connection</button>
     </div>
   `;
 }
@@ -917,6 +926,11 @@ function attachHandlers(){
         }catch(err){ setSync('bad'); showToast('Could not save', true); }
       });
     });
+    document.getElementById('save-api-url-btn').addEventListener('click', ()=>{
+      const url = document.getElementById('s-api-url').value.trim();
+      setApiUrl(url);
+      location.reload();
+    });
   }
 }
 
@@ -975,11 +989,27 @@ function renderSetupScreen(){
         <li>Create a new Google Sheet.</li>
         <li>Extensions → Apps Script, paste in <code>Code.gs</code>.</li>
         <li>Deploy → New deployment → Web app. Execute as <code>Me</code>, access <code>Anyone</code>.</li>
-        <li>Copy the URL ending in <code>/exec</code>.</li>
-        <li>Paste it into <code>API_URL</code> near the top of this file's script, and reload.</li>
+        <li>Copy the URL ending in <code>/exec</code> and paste it below.</li>
       </ol>
+      <label for="setup-api-url">Apps Script web app URL</label>
+      <input type="url" id="setup-api-url" placeholder="https://script.google.com/macros/s/…/exec">
+      <button class="btn" id="setup-connect-btn">Connect</button>
+      <div id="setup-error" class="helptext" style="color:var(--alert);margin-top:10px;"></div>
     </div>
   `;
+  document.getElementById('setup-connect-btn').addEventListener('click', async ()=>{
+    const url = document.getElementById('setup-api-url').value.trim();
+    const errEl = document.getElementById('setup-error');
+    if(!url){ errEl.textContent = 'Paste the /exec URL first.'; return; }
+    setApiUrl(url);
+    errEl.textContent = 'Connecting…';
+    try{
+      await refreshFromApi();
+      location.reload();
+    }catch(err){
+      errEl.textContent = "Couldn't reach that URL — check it's deployed with access set to Anyone.";
+    }
+  });
 }
 
 /* ============ PWA install (manifest + service worker) ============ */
@@ -990,7 +1020,7 @@ if('serviceWorker' in navigator){
 }
 
 (async function boot(){
-  if(!API_URL || API_URL.indexOf('PASTE_YOUR') === 0){
+  if(!API_URL){
     renderSetupScreen();
     return;
   }
@@ -1003,7 +1033,7 @@ if('serviceWorker' in navigator){
     render();
   }catch(err){
     setSync('bad');
-    document.getElementById('view').innerHTML = `<div class="card"><div class="empty">Couldn't reach the Google Sheet.<br>Check the deployment is set to "Anyone" access and API_URL is correct, then reload.</div></div>`;
+    document.getElementById('view').innerHTML = `<div class="card"><div class="empty">Couldn't reach the Google Sheet.<br>Check the deployment access is set to "Anyone", or update the URL in Settings → Data source.</div></div>`;
   }
 })();
 </script>
