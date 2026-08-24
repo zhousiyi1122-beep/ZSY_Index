@@ -392,10 +392,18 @@ function currentBalance(){
   const s = state.settings;
   const openingDate = s.openingBalanceDate || '1970-01-01';
   const opening = Number(s.openingBalance || 0);
+  const method = s.openingBalanceMethod || '';
   const spent = state.transactions
-    .filter(t => t.date >= openingDate)
+    .filter(t => t.date >= openingDate && (!method || t.paymentMethod === method))
     .reduce((sum,t) => sum + t.amount, 0);
   return opening - spent;
+}
+
+// Non-card payment methods only — an opening balance is a cash/bank account
+// you draw down, not a credit card, which starts at $0 owing and is tracked
+// through reconciliation instead.
+function balanceTrackableMethods(){
+  return state.settings.paymentMethods || [];
 }
 
 /* ============ View router ============ */
@@ -425,7 +433,7 @@ function renderHeader(){
   const balEl = document.getElementById('hdr-balance');
   balEl.textContent = fmtMoney(balance);
   balEl.classList.toggle('neg', balance < 0);
-  document.getElementById('hdr-balance-label').textContent = 'balance since ' + fmtDate(state.settings.openingBalanceDate || todayStr());
+  document.getElementById('hdr-balance-label').textContent = 'balance since ' + fmtDate(state.settings.openingBalanceDate || todayStr()) + (state.settings.openingBalanceMethod ? ' \u00b7 ' + state.settings.openingBalanceMethod : '');
 
   const now = todayStr();
   const cards = getCards();
@@ -507,7 +515,7 @@ function viewDashboard(){
     <div class="card">
       <div class="card-title">Running balance</div>
       <div class="mono" style="font-size:24px;font-weight:600;${currentBalance()<0?'color:var(--alert);':''}">${fmtMoney(currentBalance())}</div>
-      <div class="helptext">Opening balance ${fmtMoney(Number(state.settings.openingBalance||0))} on ${fmtDate(state.settings.openingBalanceDate||now)}, minus everything logged since. Change this in Settings.</div>
+      <div class="helptext">Opening balance ${fmtMoney(Number(state.settings.openingBalance||0))} on ${fmtDate(state.settings.openingBalanceDate||now)}${state.settings.openingBalanceMethod ? ', tracking ' + escapeHtml(state.settings.openingBalanceMethod) + ' only' : ', across all payment methods'}, minus everything logged since. Change this in Settings.</div>
     </div>
     <div class="card">
       <div class="card-title">Spend by payment method — this month</div>
@@ -720,7 +728,12 @@ function viewSettings(){
       <input type="number" id="s-opening" class="mono" step="0.01" value="${Number(s.openingBalance||0)}">
       <label for="s-opening-date">As of date</label>
       <input type="date" id="s-opening-date" value="${s.openingBalanceDate||todayStr()}">
-      <div class="helptext">The dashboard balance is this amount minus every transaction logged on or after this date.</div>
+      <label for="s-opening-method">Track this balance against</label>
+      <select id="s-opening-method">
+        <option value=""${!s.openingBalanceMethod?' selected':''}>All payment methods combined</option>
+        ${balanceTrackableMethods().map(m=>`<option value="${escapeHtml(m)}"${s.openingBalanceMethod===m?' selected':''}>${escapeHtml(m)}</option>`).join('')}
+      </select>
+      <div class="helptext">Credit cards aren't in this list — they're tracked through statements and reconciliation, not a running balance. Pick the actual cash/bank account this figure belongs to, or leave it combined.</div>
       <button class="btn" id="save-opening-btn">Save opening balance</button>
     </div>
 
@@ -968,8 +981,9 @@ function attachHandlers(){
     document.getElementById('save-opening-btn').addEventListener('click', async ()=>{
       const opening = parseFloat(document.getElementById('s-opening').value);
       const date = document.getElementById('s-opening-date').value;
+      const method = document.getElementById('s-opening-method').value;
       try{
-        const data = await apiPost('saveSettings', { data: { openingBalance: isNaN(opening)?0:opening, openingBalanceDate: date } });
+        const data = await apiPost('saveSettings', { data: { openingBalance: isNaN(opening)?0:opening, openingBalanceDate: date, openingBalanceMethod: method } });
         applyData(data);
         showToast('Opening balance saved');
         render();
