@@ -1,0 +1,1011 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>Ledger</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#12161A">
+<link rel="apple-touch-icon" href="icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Ledger">
+<style>
+  :root{
+    --ink:#E9E7DF;
+    --ink-dim:#9CA3A0;
+    --bg:#12161A;
+    --surface:#1B2126;
+    --surface-2:#222A30;
+    --line:#2E373E;
+    --money:#4FA88A;
+    --money-dim:#2F5F4E;
+    --pending:#E8A33D;
+    --alert:#D9635C;
+    --accent:#7FB8A3;
+    --radius:10px;
+    font-size:16px;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:var(--bg);
+    color:var(--ink);
+    font-family:'IBM Plex Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+    -webkit-font-smoothing:antialiased;
+    min-height:100vh;
+    padding-bottom:76px;
+  }
+  .mono{font-family:'IBM Plex Mono',ui-monospace,SFMono-Regular,Menlo,monospace;}
+  h1,h2,h3{font-family:'IBM Plex Sans',sans-serif;font-weight:600;margin:0;}
+  a{color:inherit;}
+
+  .topbar{
+    background:linear-gradient(180deg,#1A2024,#151A1E);
+    border-bottom:1px solid var(--line);
+    padding:18px 18px 16px;
+    position:sticky;top:0;z-index:10;
+  }
+  .topbar .eyebrow{
+    font-family:'IBM Plex Mono',monospace;
+    font-size:11px;letter-spacing:.14em;text-transform:uppercase;
+    color:var(--ink-dim);margin-bottom:6px;
+    display:flex;justify-content:space-between;align-items:center;
+  }
+  .sync-dot{width:7px;height:7px;border-radius:50%;background:var(--money);display:inline-block;margin-right:5px;}
+  .sync-dot.bad{background:var(--alert);}
+  .sync-dot.busy{background:var(--pending);}
+  .topbar .balance-row{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;}
+  .topbar .balance{font-size:30px;font-weight:600;font-family:'IBM Plex Mono',monospace;letter-spacing:-0.5px;}
+  .topbar .balance.neg{color:var(--alert);}
+  .topbar .balance-label{font-size:12px;color:var(--ink-dim);}
+  .topbar .sub-stats{display:flex;gap:18px;margin-top:10px;flex-wrap:wrap;}
+  .stat-chip{font-size:12px;color:var(--ink-dim);}
+  .stat-chip b{color:var(--ink);font-family:'IBM Plex Mono',monospace;font-weight:600;}
+  .stat-chip.warn b{color:var(--pending);}
+  .stat-chip.bad b{color:var(--alert);}
+
+  main{padding:16px 14px 20px;max-width:640px;margin:0 auto;}
+
+  .card{
+    background:var(--surface);
+    border:1px solid var(--line);
+    border-radius:var(--radius);
+    padding:16px;
+    margin-bottom:14px;
+  }
+  .card-title{
+    font-size:12px;letter-spacing:.1em;text-transform:uppercase;
+    color:var(--ink-dim);margin-bottom:12px;font-family:'IBM Plex Mono',monospace;
+  }
+
+  .grid-2{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
+  .metric{background:var(--surface-2);border-radius:8px;padding:12px;}
+  .metric .v{font-family:'IBM Plex Mono',monospace;font-size:19px;font-weight:600;}
+  .metric .l{font-size:11px;color:var(--ink-dim);margin-top:2px;}
+
+  .catbar-row{display:flex;align-items:center;gap:10px;margin-bottom:10px;font-size:13px;}
+  .catbar-row .name{width:96px;flex:0 0 96px;color:var(--ink-dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .catbar-track{flex:1;background:var(--surface-2);border-radius:4px;height:8px;overflow:hidden;}
+  .catbar-fill{height:100%;background:var(--accent);border-radius:4px;}
+  .catbar-row .amt{font-family:'IBM Plex Mono',monospace;width:64px;text-align:right;flex:0 0 64px;}
+
+  label{display:block;font-size:12px;color:var(--ink-dim);margin:14px 0 6px;letter-spacing:.02em;}
+  label:first-child{margin-top:0;}
+  input[type=text],input[type=number],input[type=date],input[type=url],select,textarea{
+    width:100%;background:var(--surface-2);border:1px solid var(--line);color:var(--ink);
+    border-radius:8px;padding:11px 12px;font-size:15px;font-family:inherit;
+  }
+  input.mono,input[type=number],input[type=date]{font-family:'IBM Plex Mono',monospace;}
+  input:focus,select:focus,textarea:focus{outline:2px solid var(--accent);outline-offset:0;border-color:transparent;}
+  .pill-group{display:flex;gap:8px;flex-wrap:wrap;margin-top:2px;}
+  .pill{
+    padding:8px 13px;border-radius:20px;border:1px solid var(--line);background:var(--surface-2);
+    font-size:13px;cursor:pointer;color:var(--ink-dim);
+  }
+  .pill.active{background:var(--accent);color:#0F1418;border-color:var(--accent);font-weight:600;}
+  .btn{
+    width:100%;padding:13px;border-radius:8px;border:none;background:var(--accent);color:#0F1418;
+    font-weight:600;font-size:15px;margin-top:18px;cursor:pointer;
+  }
+  .btn:active{opacity:.85;}
+  .btn:disabled{opacity:.5;}
+  .btn.secondary{background:var(--surface-2);color:var(--ink);border:1px solid var(--line);}
+  .btn.danger{background:transparent;color:var(--alert);border:1px solid var(--alert);}
+  .row-flex{display:flex;gap:10px;}
+  .row-flex .btn{margin-top:0;}
+  .helptext{font-size:11.5px;color:var(--ink-dim);margin-top:6px;line-height:1.4;}
+
+  .txn-item{
+    display:flex;justify-content:space-between;align-items:flex-start;
+    padding:12px 0;border-bottom:1px solid var(--line);gap:10px;
+  }
+  .txn-item:last-child{border-bottom:none;}
+  .txn-left .vendor{font-size:14.5px;font-weight:600;}
+  .txn-left .meta{font-size:12px;color:var(--ink-dim);margin-top:3px;}
+  .tag{
+    display:inline-block;font-size:10.5px;padding:2px 7px;border-radius:10px;
+    background:var(--surface-2);color:var(--ink-dim);margin-right:5px;font-family:'IBM Plex Mono',monospace;
+  }
+  .txn-right{text-align:right;flex:0 0 auto;}
+  .txn-right .amt{font-family:'IBM Plex Mono',monospace;font-weight:600;font-size:15px;}
+  .txn-right .rec{font-size:10.5px;margin-top:4px;}
+  .rec.yes{color:var(--money);}
+  .rec.no{color:var(--pending);}
+  .day-heading{
+    font-size:11px;color:var(--ink-dim);letter-spacing:.08em;text-transform:uppercase;
+    font-family:'IBM Plex Mono',monospace;margin:18px 0 4px;
+  }
+  .day-heading:first-child{margin-top:0;}
+  .empty{color:var(--ink-dim);font-size:13.5px;padding:24px 0;text-align:center;}
+
+  .period-card{border:1px solid var(--line);border-radius:8px;padding:13px;margin-bottom:12px;background:var(--surface-2);}
+  .period-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;}
+  .period-head .title{font-weight:600;font-size:14px;}
+  .status-badge{font-size:10.5px;padding:3px 8px;border-radius:10px;font-family:'IBM Plex Mono',monospace;}
+  .status-badge.closed{background:var(--money-dim);color:var(--money);}
+  .status-badge.open{background:#3A331F;color:var(--pending);}
+  .recon-row{display:flex;align-items:center;gap:10px;padding:7px 0;border-top:1px solid var(--line);font-size:13px;}
+  .recon-row input[type=checkbox]{width:17px;height:17px;accent-color:var(--money);flex:0 0 auto;}
+  .recon-row .rv{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .recon-row .ra{font-family:'IBM Plex Mono',monospace;flex:0 0 auto;}
+  .variance{margin-top:10px;padding-top:10px;border-top:1px dashed var(--line);}
+  .variance-ok{color:var(--money);}
+  .variance-bad{color:var(--alert);}
+
+  .list-row{display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid var(--line);}
+  .list-row:last-child{border-bottom:none;}
+  .list-row .n{font-size:14px;}
+  .list-row .m{font-size:11.5px;color:var(--ink-dim);margin-top:2px;}
+  .x-btn{background:none;border:none;color:var(--alert);font-size:18px;cursor:pointer;padding:4px 8px;}
+  .chip-add{display:flex;gap:8px;margin-top:12px;}
+  .chip-add input{flex:1;}
+  .chip-add button{flex:0 0 auto;padding:0 16px;border-radius:8px;border:1px solid var(--line);background:var(--surface-2);color:var(--ink);font-size:13px;}
+
+  .bottom-nav{
+    position:fixed;bottom:0;left:0;right:0;
+    background:#151A1E;border-top:1px solid var(--line);
+    display:flex;z-index:20;
+    padding-bottom:env(safe-area-inset-bottom);
+  }
+  .nav-btn{
+    flex:1;background:none;border:none;color:var(--ink-dim);padding:11px 4px 9px;
+    font-size:10.5px;font-family:'IBM Plex Sans',sans-serif;letter-spacing:.02em;
+    display:flex;flex-direction:column;align-items:center;gap:4px;cursor:pointer;
+  }
+  .nav-btn svg{width:20px;height:20px;stroke:var(--ink-dim);}
+  .nav-btn.active{color:var(--accent);}
+  .nav-btn.active svg{stroke:var(--accent);}
+
+  .toast{
+    position:fixed;bottom:86px;left:50%;transform:translateX(-50%);
+    background:var(--accent);color:#0F1418;padding:10px 18px;border-radius:20px;
+    font-size:13px;font-weight:600;z-index:30;opacity:0;pointer-events:none;
+    transition:opacity .25s, transform .25s;
+  }
+  .toast.show{opacity:1;transform:translateX(-50%) translateY(-6px);}
+  .toast.error{background:var(--alert);color:#fff;}
+
+  .setup-screen{padding:40px 20px;max-width:480px;margin:0 auto;}
+  .setup-screen ol{padding-left:20px;font-size:14px;line-height:1.7;color:var(--ink-dim);}
+  .setup-screen code{background:var(--surface-2);padding:1px 6px;border-radius:4px;font-family:'IBM Plex Mono',monospace;font-size:12.5px;}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="eyebrow"><span><span class="sync-dot" id="sync-dot"></span><span id="sync-label">Ledger — Daily Transaction Log</span></span></div>
+  <div class="balance-row">
+    <span class="balance mono" id="hdr-balance">$0.00</span>
+    <span class="balance-label" id="hdr-balance-label">balance</span>
+  </div>
+  <div class="sub-stats" id="hdr-substats"></div>
+</div>
+
+<main id="view"></main>
+
+<div class="toast" id="toast"></div>
+
+<nav class="bottom-nav" id="bottom-nav" style="display:none;">
+  <button class="nav-btn" data-view="dashboard">
+    <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9"/><rect x="14" y="3" width="7" height="5"/><rect x="14" y="12" width="7" height="9"/><rect x="3" y="16" width="7" height="5"/></svg>
+    Dashboard
+  </button>
+  <button class="nav-btn" data-view="add">
+    <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></svg>
+    Add
+  </button>
+  <button class="nav-btn" data-view="log">
+    <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+    Log
+  </button>
+  <button class="nav-btn" data-view="reconcile">
+    <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+    Reconcile
+  </button>
+  <button class="nav-btn" data-view="settings">
+    <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.13.36.35.68.63.94"/></svg>
+    Settings
+  </button>
+</nav>
+
+<script>
+/* ============================================================
+   CONFIG — paste your Apps Script web app URL here after you
+   deploy Code.gs (Deploy -> New deployment -> Web app -> copy
+   the URL ending in /exec).
+   ============================================================ */
+const API_URL = 'PASTE_YOUR_APPS_SCRIPT_WEB_APP_URL_HERE';
+
+/* ============ State ============ */
+let state = { transactions: [], merchants: [], settings: null };
+let currentView = 'dashboard';
+let apiReady = false;
+
+function uid(){ return Date.now().toString(36) + Math.random().toString(36).slice(2,7); }
+
+/* ============ API layer (Google Sheets via Apps Script) ============ */
+function setSync(status){ // 'ok' | 'busy' | 'bad'
+  const dot = document.getElementById('sync-dot');
+  const label = document.getElementById('sync-label');
+  if(!dot) return;
+  dot.className = 'sync-dot' + (status==='bad'?' bad':status==='busy'?' busy':'');
+  label.textContent = status==='bad' ? 'Ledger — sync error' : status==='busy' ? 'Ledger — syncing…' : 'Ledger — Daily Transaction Log';
+}
+
+async function apiGet(){
+  const res = await fetch(API_URL, { method:'GET' });
+  if(!res.ok) throw new Error('GET failed: ' + res.status);
+  return res.json();
+}
+
+async function apiPost(action, extra){
+  setSync('busy');
+  const res = await fetch(API_URL, {
+    method:'POST',
+    // text/plain avoids a CORS preflight against Apps Script, which doesn't handle OPTIONS
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify(Object.assign({ action }, extra))
+  });
+  if(!res.ok) throw new Error('POST failed: ' + res.status);
+  const data = await res.json();
+  setSync('ok');
+  return data;
+}
+
+async function refreshFromApi(){
+  const data = await apiGet();
+  applyData(data);
+}
+
+function applyData(data){
+  state.transactions = (data.transactions||[]).map(t=>({...t, amount:Number(t.amount)}));
+  state.merchants = data.merchants||[];
+  state.settings = data.settings||{};
+}
+
+/* ============ Toast ============ */
+function showToast(msg, isError){
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'toast show' + (isError?' error':'');
+  clearTimeout(showToast._h);
+  showToast._h = setTimeout(()=>t.classList.remove('show'), 2200);
+}
+
+/* ============ Formatting helpers ============ */
+function fmtMoney(n){
+  const sign = n < 0 ? '-' : '';
+  return sign + '$' + Math.abs(n).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+}
+function fmtDate(d){
+  const dt = new Date(d + 'T00:00:00');
+  return dt.toLocaleDateString('en-AU',{day:'numeric',month:'short',year:'numeric'});
+}
+function fmtDateShort(d){
+  const dt = new Date(d + 'T00:00:00');
+  return dt.toLocaleDateString('en-AU',{weekday:'short',day:'numeric',month:'short'});
+}
+function todayStr(){
+  const d = new Date();
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+}
+
+/* ============ Statement period logic ============ */
+function periodEndFor(dateStr, closingDay){
+  const d = new Date(dateStr + 'T00:00:00');
+  const y = d.getFullYear(), m = d.getMonth(), day = d.getDate();
+  const lastDayThisMonth = new Date(y, m+1, 0).getDate();
+  const cd = Math.min(closingDay, lastDayThisMonth);
+  let end = new Date(y, m, cd);
+  if(day > cd){
+    const nm = new Date(y, m+1, 1);
+    const lastDayNext = new Date(nm.getFullYear(), nm.getMonth()+1, 0).getDate();
+    end = new Date(nm.getFullYear(), nm.getMonth(), Math.min(closingDay, lastDayNext));
+  }
+  return end;
+}
+function periodKeyFor(dateStr, closingDay){
+  const end = periodEndFor(dateStr, closingDay);
+  return end.getFullYear()+'-'+String(end.getMonth()+1).padStart(2,'0')+'-'+String(end.getDate()).padStart(2,'0');
+}
+function periodStartFromEnd(endDate){
+  const start = new Date(endDate);
+  start.setMonth(start.getMonth()-1);
+  start.setDate(start.getDate()+1);
+  return start;
+}
+function periodLabel(endKey){
+  const end = new Date(endKey + 'T00:00:00');
+  const start = periodStartFromEnd(end);
+  const opts = {day:'numeric',month:'short'};
+  return start.toLocaleDateString('en-AU',opts) + ' \u2013 ' + end.toLocaleDateString('en-AU',{day:'numeric',month:'short',year:'numeric'});
+}
+
+/* ============ Merchant helpers ============ */
+function findMerchant(name){
+  const n = name.trim().toLowerCase();
+  return state.merchants.find(m => m.name.toLowerCase() === n);
+}
+async function upsertMerchantFromEntry(name, category, paymentMethod){
+  if(!name.trim()) return;
+  if(findMerchant(name)) return;
+  const data = await apiPost('addMerchant', { data: { name: name.trim(), category, paymentMethod } });
+  applyData(data);
+}
+
+/* ============ Balance ============ */
+function currentBalance(){
+  const s = state.settings;
+  const openingDate = s.openingBalanceDate || '1970-01-01';
+  const opening = Number(s.openingBalance || 0);
+  const spent = state.transactions
+    .filter(t => t.date >= openingDate)
+    .reduce((sum,t) => sum + t.amount, 0);
+  return opening - spent;
+}
+
+/* ============ View router ============ */
+function setView(v){
+  currentView = v;
+  document.querySelectorAll('.nav-btn').forEach(b=>b.classList.toggle('active', b.dataset.view===v));
+  render();
+}
+document.querySelectorAll('.nav-btn').forEach(b=>{
+  b.addEventListener('click', ()=> setView(b.dataset.view));
+});
+
+function render(){
+  const el = document.getElementById('view');
+  renderHeader();
+  if(currentView==='dashboard') el.innerHTML = viewDashboard();
+  else if(currentView==='add') el.innerHTML = viewAdd();
+  else if(currentView==='log') el.innerHTML = viewLog();
+  else if(currentView==='reconcile') el.innerHTML = viewReconcile();
+  else if(currentView==='settings') el.innerHTML = viewSettings();
+  attachHandlers();
+}
+
+/* ============ Header (balance + close countdown) ============ */
+function renderHeader(){
+  const balance = currentBalance();
+  const balEl = document.getElementById('hdr-balance');
+  balEl.textContent = fmtMoney(balance);
+  balEl.classList.toggle('neg', balance < 0);
+  document.getElementById('hdr-balance-label').textContent = 'balance since ' + fmtDate(state.settings.openingBalanceDate || todayStr());
+
+  const now = todayStr();
+  const closingDay = state.settings.closingDay || 15;
+  const end = periodEndFor(now, closingDay);
+  const daysLeft = Math.round((end - new Date(now+'T00:00:00')) / 86400000);
+  const key = periodKeyFor(now, closingDay);
+  const ccSpend = state.transactions.filter(t => t.paymentMethod==='Credit Card' && periodKeyFor(t.date, closingDay)===key)
+    .reduce((s,t)=>s+t.amount,0);
+  const unreconciled = state.transactions.filter(t => t.paymentMethod==='Credit Card' && !t.reconciled).length;
+
+  let statsHtml = `<div class="stat-chip"><b>${fmtMoney(ccSpend)}</b> current CC statement</div>`;
+  statsHtml += `<div class="stat-chip${daysLeft<=3?' warn':''}"><b>${daysLeft}d</b> to close (${fmtDate(key)})</div>`;
+  if(unreconciled>0) statsHtml += `<div class="stat-chip warn"><b>${unreconciled}</b> unreconciled</div>`;
+  if(state.settings.creditLimit){
+    const over = ccSpend > state.settings.creditLimit;
+    statsHtml += `<div class="stat-chip${over?' bad':''}"><b>${fmtMoney(state.settings.creditLimit - ccSpend)}</b> limit headroom</div>`;
+  }
+  document.getElementById('hdr-substats').innerHTML = statsHtml;
+}
+
+/* ============ Dashboard ============ */
+function viewDashboard(){
+  const now = todayStr();
+  const closingDay = state.settings.closingDay || 15;
+  const monthTxns = state.transactions.filter(t => t.date.slice(0,7) === now.slice(0,7));
+  const byMethod = {};
+  (state.settings.paymentMethods||[]).forEach(m => byMethod[m] = 0);
+  monthTxns.forEach(t => byMethod[t.paymentMethod] = (byMethod[t.paymentMethod]||0) + t.amount);
+
+  const byCat = {};
+  monthTxns.forEach(t => byCat[t.category] = (byCat[t.category]||0) + t.amount);
+  const catEntries = Object.entries(byCat).sort((a,b)=>b[1]-a[1]);
+  const maxCat = catEntries.length ? catEntries[0][1] : 1;
+
+  const key = periodKeyFor(now, closingDay);
+  const periodRec = (state.settings.periods||{})[key];
+
+  let methodCards = (state.settings.paymentMethods||[]).map(m => `
+    <div class="metric">
+      <div class="v">${fmtMoney(byMethod[m]||0)}</div>
+      <div class="l">${m}</div>
+    </div>`).join('');
+
+  let catBars = catEntries.length ? catEntries.map(([cat,amt])=>`
+    <div class="catbar-row">
+      <div class="name">${escapeHtml(cat)}</div>
+      <div class="catbar-track"><div class="catbar-fill" style="width:${Math.max(4,(amt/maxCat*100))}%"></div></div>
+      <div class="amt">${fmtMoney(amt)}</div>
+    </div>`).join('') : `<div class="empty">No transactions logged this month yet.</div>`;
+
+  return `
+    <div class="card">
+      <div class="card-title">Running balance</div>
+      <div class="mono" style="font-size:24px;font-weight:600;${currentBalance()<0?'color:var(--alert);':''}">${fmtMoney(currentBalance())}</div>
+      <div class="helptext">Opening balance ${fmtMoney(Number(state.settings.openingBalance||0))} on ${fmtDate(state.settings.openingBalanceDate||now)}, minus everything logged since. Change this in Settings.</div>
+    </div>
+    <div class="card">
+      <div class="card-title">Spend by payment method — this month</div>
+      <div class="grid-2">${methodCards}</div>
+    </div>
+    <div class="card">
+      <div class="card-title">Spend by category — this month</div>
+      ${catBars}
+    </div>
+    <div class="card">
+      <div class="card-title">Current statement period</div>
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <div>
+          <div style="font-size:14px;font-weight:600;">${periodLabel(key)}</div>
+          <div class="helptext" style="margin-top:4px;">Closes ${fmtDate(key)}</div>
+        </div>
+        <div class="mono" style="font-size:18px;font-weight:600;">${fmtMoney(byMethod['Credit Card']||0)}</div>
+      </div>
+      ${periodRec && periodRec.closed ? `<div class="helptext" style="color:var(--money);margin-top:8px;">Reconciled against statement of ${fmtMoney(periodRec.actualTotal)}</div>` : ''}
+    </div>
+  `;
+}
+
+/* ============ Add Transaction ============ */
+function viewAdd(){
+  const cats = state.settings.categories||[];
+  const methods = state.settings.paymentMethods||[];
+  const merchantOptions = state.merchants.map(m=>`<option value="${escapeHtml(m.name)}">`).join('');
+  return `
+    <div class="card">
+      <div class="card-title">New transaction</div>
+      <form id="add-form">
+        <label for="f-date">Date</label>
+        <input type="date" id="f-date" value="${todayStr()}" required>
+
+        <label for="f-vendor">Vendor</label>
+        <input type="text" id="f-vendor" list="merchant-list" placeholder="e.g. Bunnings, Officeworks" autocomplete="off" required>
+        <datalist id="merchant-list">${merchantOptions}</datalist>
+        <div class="helptext">Type a new vendor and it'll be saved to your merchant list automatically.</div>
+
+        <label for="f-amount">Amount (AUD)</label>
+        <input type="number" id="f-amount" class="mono" step="0.01" min="0" placeholder="0.00" required>
+
+        <label>Method of payment</label>
+        <div class="pill-group" id="f-method-group">
+          ${methods.map((m,i)=>`<div class="pill${i===1?' active':''}" data-value="${escapeHtml(m)}">${escapeHtml(m)}</div>`).join('')}
+        </div>
+
+        <label>Category of goods / services</label>
+        <div class="pill-group" id="f-category-group">
+          ${cats.map((c,i)=>`<div class="pill${i===0?' active':''}" data-value="${escapeHtml(c)}">${escapeHtml(c)}</div>`).join('')}
+        </div>
+
+        <label for="f-notes">Notes (optional)</label>
+        <textarea id="f-notes" rows="2" placeholder="Anything worth remembering about this purchase"></textarea>
+
+        <button type="submit" class="btn" id="add-submit-btn">Save transaction</button>
+      </form>
+    </div>
+  `;
+}
+
+/* ============ Log ============ */
+function viewLog(){
+  const sorted = [...state.transactions].sort((a,b)=> b.date.localeCompare(a.date) || String(b.id).localeCompare(String(a.id)));
+  if(!sorted.length) return `<div class="card"><div class="empty">No transactions yet. Tap Add to log your first one.</div></div>`;
+
+  let html = '<div class="card">';
+  let lastDate = null;
+  sorted.forEach(t=>{
+    if(t.date !== lastDate){
+      html += `<div class="day-heading">${fmtDateShort(t.date)}</div>`;
+      lastDate = t.date;
+    }
+    html += `
+      <div class="txn-item" data-id="${t.id}">
+        <div class="txn-left">
+          <div class="vendor">${escapeHtml(t.vendor)}</div>
+          <div class="meta"><span class="tag">${escapeHtml(t.paymentMethod)}</span><span class="tag">${escapeHtml(t.category)}</span></div>
+        </div>
+        <div class="txn-right">
+          <div class="amt">${fmtMoney(t.amount)}</div>
+          ${t.paymentMethod==='Credit Card' ? `<div class="rec ${t.reconciled?'yes':'no'}">${t.reconciled?'reconciled':'pending'}</div>` : ''}
+        </div>
+      </div>`;
+  });
+  html += '</div>';
+  html += `<div class="helptext" style="text-align:center;margin-top:-4px;">Tap a transaction to edit or delete it.</div>`;
+  return html;
+}
+
+function viewEditTxn(id){
+  const t = state.transactions.find(x=>String(x.id)===String(id));
+  if(!t) return `<div class="card"><div class="empty">Transaction not found.</div></div>`;
+  const cats = state.settings.categories||[];
+  const methods = state.settings.paymentMethods||[];
+  return `
+    <div class="card">
+      <div class="card-title">Edit transaction</div>
+      <form id="edit-form" data-id="${t.id}">
+        <label for="ef-date">Date</label>
+        <input type="date" id="ef-date" value="${t.date}" required>
+
+        <label for="ef-vendor">Vendor</label>
+        <input type="text" id="ef-vendor" value="${escapeHtml(t.vendor)}" required>
+
+        <label for="ef-amount">Amount (AUD)</label>
+        <input type="number" id="ef-amount" class="mono" step="0.01" min="0" value="${t.amount}" required>
+
+        <label>Method of payment</label>
+        <div class="pill-group" id="ef-method-group">
+          ${methods.map(m=>`<div class="pill${m===t.paymentMethod?' active':''}" data-value="${escapeHtml(m)}">${escapeHtml(m)}</div>`).join('')}
+        </div>
+
+        <label>Category</label>
+        <div class="pill-group" id="ef-category-group">
+          ${cats.map(c=>`<div class="pill${c===t.category?' active':''}" data-value="${escapeHtml(c)}">${escapeHtml(c)}</div>`).join('')}
+        </div>
+
+        <label for="ef-notes">Notes</label>
+        <textarea id="ef-notes" rows="2">${escapeHtml(t.notes||'')}</textarea>
+
+        <div class="row-flex" style="margin-top:18px;">
+          <button type="submit" class="btn" style="margin-top:0;">Save changes</button>
+        </div>
+        <button type="button" class="btn danger" id="delete-txn-btn">Delete transaction</button>
+      </form>
+    </div>
+  `;
+}
+
+/* ============ Reconcile ============ */
+function viewReconcile(){
+  const closingDay = state.settings.closingDay || 15;
+  const ccTxns = state.transactions.filter(t => t.paymentMethod === 'Credit Card');
+  if(!ccTxns.length){
+    return `<div class="card"><div class="empty">No credit card transactions logged yet. Reconciliation groups credit card entries into monthly statement periods based on your closing date.</div></div>`;
+  }
+  const periods = {};
+  ccTxns.forEach(t=>{
+    const key = periodKeyFor(t.date, closingDay);
+    (periods[key] = periods[key] || []).push(t);
+  });
+  const keys = Object.keys(periods).sort().reverse();
+
+  let html = '';
+  keys.forEach(key=>{
+    const txns = periods[key].sort((a,b)=>a.date.localeCompare(b.date));
+    const total = txns.reduce((s,t)=>s+t.amount,0);
+    const recCount = txns.filter(t=>t.reconciled).length;
+    const pr = (state.settings.periods||{})[key];
+    const closed = pr && pr.closed;
+    const actual = pr ? pr.actualTotal : null;
+    html += `
+      <div class="period-card" data-period="${key}">
+        <div class="period-head">
+          <div class="title">${periodLabel(key)}</div>
+          <div class="status-badge ${closed?'closed':'open'}">${closed?'closed':'open'}</div>
+        </div>
+        <div class="helptext">${recCount}/${txns.length} matched \u2014 logged total ${fmtMoney(total)}</div>
+        ${txns.map(t=>`
+          <div class="recon-row">
+            <input type="checkbox" class="recon-check" data-id="${t.id}" ${t.reconciled?'checked':''}>
+            <div class="rv">${escapeHtml(t.vendor)} \u00b7 ${fmtDate(t.date)}</div>
+            <div class="ra mono">${fmtMoney(t.amount)}</div>
+          </div>
+        `).join('')}
+        <div class="variance">
+          <label for="actual-${key}" style="margin:0 0 6px;">Actual statement total</label>
+          <input type="number" step="0.01" class="mono actual-input" id="actual-${key}" data-period="${key}" placeholder="Enter amount from statement" value="${actual!==null && actual!==undefined ? actual : ''}">
+          <div id="variance-${key}" class="helptext" style="margin-top:8px;"></div>
+          <button type="button" class="btn secondary close-period-btn" data-period="${key}" style="margin-top:12px;">${closed?'Reopen period':'Mark statement reconciled'}</button>
+        </div>
+      </div>`;
+  });
+  return html;
+}
+
+function updateVarianceDisplay(key){
+  const input = document.getElementById('actual-'+key);
+  const disp = document.getElementById('variance-'+key);
+  if(!input || !disp) return;
+  const closingDay = state.settings.closingDay || 15;
+  const txns = state.transactions.filter(t=>t.paymentMethod==='Credit Card' && periodKeyFor(t.date,closingDay)===key);
+  const total = txns.reduce((s,t)=>s+t.amount,0);
+  const actual = parseFloat(input.value);
+  if(isNaN(actual)){ disp.textContent=''; return; }
+  const diff = actual - total;
+  if(Math.abs(diff) < 0.01){
+    disp.innerHTML = `<span class="variance-ok">Matches \u2014 logged total agrees with statement.</span>`;
+  } else {
+    disp.innerHTML = `<span class="variance-bad">Variance of ${fmtMoney(Math.abs(diff))} \u2014 statement is ${diff>0?'higher':'lower'} than logged transactions.</span>`;
+  }
+}
+
+/* ============ Settings ============ */
+function viewSettings(){
+  const s = state.settings;
+  return `
+    <div class="card">
+      <div class="card-title">Opening balance</div>
+      <label for="s-opening">Opening balance (AUD)</label>
+      <input type="number" id="s-opening" class="mono" step="0.01" value="${Number(s.openingBalance||0)}">
+      <label for="s-opening-date">As of date</label>
+      <input type="date" id="s-opening-date" value="${s.openingBalanceDate||todayStr()}">
+      <div class="helptext">The dashboard balance is this amount minus every transaction logged on or after this date.</div>
+      <button class="btn" id="save-opening-btn">Save opening balance</button>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Statement closing date</div>
+      <label for="s-closing">Day of month the credit card statement closes</label>
+      <input type="number" id="s-closing" class="mono" min="1" max="28" value="${s.closingDay||15}">
+      <div class="helptext">Used to group credit card transactions into monthly statement periods for reconciliation.</div>
+
+      <label for="s-limit">Credit limit (optional)</label>
+      <input type="number" id="s-limit" class="mono" step="0.01" min="0" placeholder="e.g. 10000" value="${s.creditLimit!==null && s.creditLimit!==undefined ? s.creditLimit : ''}">
+      <div class="helptext">Shown on the dashboard as headroom remaining in the current statement period.</div>
+
+      <button class="btn" id="save-settings-btn">Save settings</button>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Merchants</div>
+      <div class="helptext" style="margin-bottom:10px;">New vendors are added automatically when you log a transaction. Manage or pre-configure them here.</div>
+      <div id="merchant-list-ui">
+        ${state.merchants.length ? state.merchants.map(m=>`
+          <div class="list-row">
+            <div>
+              <div class="n">${escapeHtml(m.name)}</div>
+              <div class="m">${escapeHtml(m.category)} \u00b7 ${escapeHtml(m.paymentMethod)}</div>
+            </div>
+            <button class="x-btn" data-remove-merchant="${m.id}">&times;</button>
+          </div>`).join('') : `<div class="empty">No merchants configured yet.</div>`}
+      </div>
+      <div style="margin-top:14px;">
+        <label for="nm-name">Vendor name</label>
+        <input type="text" id="nm-name" placeholder="e.g. Bunnings Warehouse">
+        <label for="nm-category">Default category</label>
+        <select id="nm-category">${(s.categories||[]).map(c=>`<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('')}</select>
+        <label for="nm-method">Default payment method</label>
+        <select id="nm-method">${(s.paymentMethods||[]).map(m=>`<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join('')}</select>
+        <button class="btn secondary" id="add-merchant-btn" style="margin-top:14px;">Add merchant</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Categories</div>
+      ${(s.categories||[]).map(c=>`
+        <div class="list-row"><div class="n">${escapeHtml(c)}</div><button class="x-btn" data-remove-category="${escapeHtml(c)}">&times;</button></div>
+      `).join('')}
+      <div class="chip-add">
+        <input type="text" id="new-category-input" placeholder="New category">
+        <button id="add-category-btn">Add</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Payment methods</div>
+      ${(s.paymentMethods||[]).map(m=>`
+        <div class="list-row"><div class="n">${escapeHtml(m)}</div><button class="x-btn" data-remove-method="${escapeHtml(m)}">&times;</button></div>
+      `).join('')}
+      <div class="chip-add">
+        <input type="text" id="new-method-input" placeholder="New payment method">
+        <button id="add-method-btn">Add</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Data source</div>
+      <div class="helptext">This app reads and writes a Google Sheet through the Apps Script deployment configured at the top of index.html. Open the Sheet directly any time to see the raw data.</div>
+    </div>
+  `;
+}
+
+/* ============ Escaping ============ */
+function escapeHtml(str){
+  return String(str).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+}
+
+/* ============ Event handling per view ============ */
+function attachHandlers(){
+  if(currentView === 'add'){
+    document.querySelectorAll('#f-method-group .pill').forEach(p=>{
+      p.addEventListener('click', ()=>{
+        document.querySelectorAll('#f-method-group .pill').forEach(x=>x.classList.remove('active'));
+        p.classList.add('active');
+      });
+    });
+    document.querySelectorAll('#f-category-group .pill').forEach(p=>{
+      p.addEventListener('click', ()=>{
+        document.querySelectorAll('#f-category-group .pill').forEach(x=>x.classList.remove('active'));
+        p.classList.add('active');
+      });
+    });
+    const vendorInput = document.getElementById('f-vendor');
+    vendorInput.addEventListener('change', ()=>{
+      const m = findMerchant(vendorInput.value);
+      if(m){
+        document.querySelectorAll('#f-method-group .pill').forEach(x=>x.classList.toggle('active', x.dataset.value===m.paymentMethod));
+        document.querySelectorAll('#f-category-group .pill').forEach(x=>x.classList.toggle('active', x.dataset.value===m.category));
+      }
+    });
+    document.getElementById('add-form').addEventListener('submit', async (e)=>{
+      e.preventDefault();
+      const date = document.getElementById('f-date').value;
+      const vendor = document.getElementById('f-vendor').value.trim();
+      const amount = parseFloat(document.getElementById('f-amount').value);
+      const method = document.querySelector('#f-method-group .pill.active')?.dataset.value || (state.settings.paymentMethods||[])[0];
+      const category = document.querySelector('#f-category-group .pill.active')?.dataset.value || (state.settings.categories||[])[0];
+      const notes = document.getElementById('f-notes').value.trim();
+      if(!vendor || isNaN(amount)) return;
+      const btn = document.getElementById('add-submit-btn');
+      btn.disabled = true; btn.textContent = 'Saving…';
+      try{
+        const data = await apiPost('addTransaction', { data: { date, vendor, amount, paymentMethod: method, category, notes, reconciled:false } });
+        applyData(data);
+        await upsertMerchantFromEntry(vendor, category, method);
+        showToast('Transaction saved');
+        setView('log');
+      }catch(err){
+        setSync('bad');
+        showToast('Could not save — check your connection', true);
+        btn.disabled = false; btn.textContent = 'Save transaction';
+      }
+    });
+  }
+
+  if(currentView === 'log'){
+    document.querySelectorAll('.txn-item').forEach(item=>{
+      item.addEventListener('click', ()=>{
+        const id = item.dataset.id;
+        document.getElementById('view').innerHTML = viewEditTxn(id);
+        attachEditHandlers(id);
+      });
+    });
+  }
+
+  if(currentView === 'reconcile'){
+    document.querySelectorAll('.recon-check').forEach(cb=>{
+      cb.addEventListener('change', async ()=>{
+        const t = state.transactions.find(x=>String(x.id)===cb.dataset.id);
+        if(!t) return;
+        t.reconciled = cb.checked;
+        try{
+          const data = await apiPost('updateTransaction', { data: t });
+          applyData(data);
+          render();
+        }catch(err){
+          setSync('bad');
+          showToast('Could not sync that change', true);
+        }
+      });
+    });
+    document.querySelectorAll('.actual-input').forEach(inp=>{
+      inp.addEventListener('input', ()=> updateVarianceDisplay(inp.dataset.period));
+      updateVarianceDisplay(inp.dataset.period);
+    });
+    document.querySelectorAll('.close-period-btn').forEach(btn=>{
+      btn.addEventListener('click', async ()=>{
+        const key = btn.dataset.period;
+        const input = document.getElementById('actual-'+key);
+        const actual = parseFloat(input.value);
+        const isClosed = state.settings.periods && state.settings.periods[key] && state.settings.periods[key].closed;
+        const periods = Object.assign({}, state.settings.periods);
+        periods[key] = { closed: !isClosed, actualTotal: isNaN(actual)?null:actual };
+        try{
+          const data = await apiPost('saveSettings', { data: { periods } });
+          applyData(data);
+          showToast(isClosed ? 'Period reopened' : 'Period marked reconciled');
+          render();
+        }catch(err){
+          setSync('bad');
+          showToast('Could not sync that change', true);
+        }
+      });
+    });
+  }
+
+  if(currentView === 'settings'){
+    document.getElementById('save-opening-btn').addEventListener('click', async ()=>{
+      const opening = parseFloat(document.getElementById('s-opening').value);
+      const date = document.getElementById('s-opening-date').value;
+      try{
+        const data = await apiPost('saveSettings', { data: { openingBalance: isNaN(opening)?0:opening, openingBalanceDate: date } });
+        applyData(data);
+        showToast('Opening balance saved');
+        render();
+      }catch(err){ setSync('bad'); showToast('Could not save', true); }
+    });
+
+    document.getElementById('save-settings-btn').addEventListener('click', async ()=>{
+      const cd = parseInt(document.getElementById('s-closing').value, 10);
+      const limitRaw = document.getElementById('s-limit').value;
+      try{
+        const data = await apiPost('saveSettings', { data: {
+          closingDay: (cd>=1 && cd<=28) ? cd : state.settings.closingDay,
+          creditLimit: limitRaw === '' ? null : parseFloat(limitRaw)
+        }});
+        applyData(data);
+        showToast('Settings saved');
+        render();
+      }catch(err){ setSync('bad'); showToast('Could not save', true); }
+    });
+
+    document.getElementById('add-merchant-btn').addEventListener('click', async ()=>{
+      const name = document.getElementById('nm-name').value.trim();
+      if(!name) return;
+      if(findMerchant(name)){ showToast('That merchant already exists'); return; }
+      try{
+        const data = await apiPost('addMerchant', { data: {
+          name, category: document.getElementById('nm-category').value, paymentMethod: document.getElementById('nm-method').value
+        }});
+        applyData(data);
+        showToast('Merchant added');
+        render();
+      }catch(err){ setSync('bad'); showToast('Could not save', true); }
+    });
+    document.querySelectorAll('[data-remove-merchant]').forEach(btn=>{
+      btn.addEventListener('click', async ()=>{
+        try{
+          const data = await apiPost('deleteMerchant', { id: btn.dataset.removeMerchant });
+          applyData(data);
+          render();
+        }catch(err){ setSync('bad'); showToast('Could not delete', true); }
+      });
+    });
+
+    document.getElementById('add-category-btn').addEventListener('click', async ()=>{
+      const v = document.getElementById('new-category-input').value.trim();
+      if(!v || (state.settings.categories||[]).includes(v)) return;
+      const categories = [...(state.settings.categories||[]), v];
+      try{
+        const data = await apiPost('saveSettings', { data: { categories } });
+        applyData(data);
+        render();
+      }catch(err){ setSync('bad'); showToast('Could not save', true); }
+    });
+    document.querySelectorAll('[data-remove-category]').forEach(btn=>{
+      btn.addEventListener('click', async ()=>{
+        const categories = (state.settings.categories||[]).filter(c=>c!==btn.dataset.removeCategory);
+        try{
+          const data = await apiPost('saveSettings', { data: { categories } });
+          applyData(data);
+          render();
+        }catch(err){ setSync('bad'); showToast('Could not save', true); }
+      });
+    });
+
+    document.getElementById('add-method-btn').addEventListener('click', async ()=>{
+      const v = document.getElementById('new-method-input').value.trim();
+      if(!v || (state.settings.paymentMethods||[]).includes(v)) return;
+      const paymentMethods = [...(state.settings.paymentMethods||[]), v];
+      try{
+        const data = await apiPost('saveSettings', { data: { paymentMethods } });
+        applyData(data);
+        render();
+      }catch(err){ setSync('bad'); showToast('Could not save', true); }
+    });
+    document.querySelectorAll('[data-remove-method]').forEach(btn=>{
+      btn.addEventListener('click', async ()=>{
+        const paymentMethods = (state.settings.paymentMethods||[]).filter(m=>m!==btn.dataset.removeMethod);
+        try{
+          const data = await apiPost('saveSettings', { data: { paymentMethods } });
+          applyData(data);
+          render();
+        }catch(err){ setSync('bad'); showToast('Could not save', true); }
+      });
+    });
+  }
+}
+
+function attachEditHandlers(id){
+  document.querySelectorAll('#ef-method-group .pill').forEach(p=>{
+    p.addEventListener('click', ()=>{
+      document.querySelectorAll('#ef-method-group .pill').forEach(x=>x.classList.remove('active'));
+      p.classList.add('active');
+    });
+  });
+  document.querySelectorAll('#ef-category-group .pill').forEach(p=>{
+    p.addEventListener('click', ()=>{
+      document.querySelectorAll('#ef-category-group .pill').forEach(x=>x.classList.remove('active'));
+      p.classList.add('active');
+    });
+  });
+  document.getElementById('edit-form').addEventListener('submit', async (e)=>{
+    e.preventDefault();
+    const t = state.transactions.find(x=>String(x.id)===String(id));
+    if(!t) return;
+    const updated = {
+      id: t.id,
+      date: document.getElementById('ef-date').value,
+      vendor: document.getElementById('ef-vendor').value.trim(),
+      amount: parseFloat(document.getElementById('ef-amount').value),
+      paymentMethod: document.querySelector('#ef-method-group .pill.active')?.dataset.value || t.paymentMethod,
+      category: document.querySelector('#ef-category-group .pill.active')?.dataset.value || t.category,
+      notes: document.getElementById('ef-notes').value.trim(),
+      reconciled: t.reconciled
+    };
+    try{
+      const data = await apiPost('updateTransaction', { data: updated });
+      applyData(data);
+      showToast('Transaction updated');
+      setView('log');
+    }catch(err){ setSync('bad'); showToast('Could not save', true); }
+  });
+  document.getElementById('delete-txn-btn').addEventListener('click', async ()=>{
+    try{
+      const data = await apiPost('deleteTransaction', { id });
+      applyData(data);
+      showToast('Transaction deleted');
+      setView('log');
+    }catch(err){ setSync('bad'); showToast('Could not delete', true); }
+  });
+}
+
+/* ============ Boot ============ */
+function renderSetupScreen(){
+  document.getElementById('bottom-nav').style.display = 'none';
+  document.getElementById('view').innerHTML = `
+    <div class="setup-screen">
+      <h2 style="margin-bottom:10px;">Connect your Google Sheet</h2>
+      <p class="helptext" style="font-size:13px;margin-bottom:16px;">This app stores everything in a Google Sheet, the same way TICKR does. One-time setup:</p>
+      <ol>
+        <li>Create a new Google Sheet.</li>
+        <li>Extensions → Apps Script, paste in <code>Code.gs</code>.</li>
+        <li>Deploy → New deployment → Web app. Execute as <code>Me</code>, access <code>Anyone</code>.</li>
+        <li>Copy the URL ending in <code>/exec</code>.</li>
+        <li>Paste it into <code>API_URL</code> near the top of this file's script, and reload.</li>
+      </ol>
+    </div>
+  `;
+}
+
+/* ============ PWA install (manifest + service worker) ============ */
+if('serviceWorker' in navigator){
+  window.addEventListener('load', ()=>{
+    navigator.serviceWorker.register('./sw.js').catch(()=>{ /* offline shell just won't be available */ });
+  });
+}
+
+(async function boot(){
+  if(!API_URL || API_URL.indexOf('PASTE_YOUR') === 0){
+    renderSetupScreen();
+    return;
+  }
+  document.getElementById('bottom-nav').style.display = 'flex';
+  document.querySelector('.nav-btn[data-view="dashboard"]').classList.add('active');
+  setSync('busy');
+  try{
+    await refreshFromApi();
+    setSync('ok');
+    render();
+  }catch(err){
+    setSync('bad');
+    document.getElementById('view').innerHTML = `<div class="card"><div class="empty">Couldn't reach the Google Sheet.<br>Check the deployment is set to "Anyone" access and API_URL is correct, then reload.</div></div>`;
+  }
+})();
+</script>
+</body>
+</html>
