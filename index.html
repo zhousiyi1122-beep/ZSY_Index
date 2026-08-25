@@ -324,6 +324,42 @@ function afterpayTag(notes){
   return m ? `<span class="tag" style="color:var(--pending);">Afterpay ${m[1]}/${m[2]}</span>` : '';
 }
 
+// Groups the 4 installment transactions of one Afterpay purchase back
+// together, so the dashboard can show what's still owed on it. New
+// purchases carry a hidden [apg:ID] token in their notes; older ones
+// (logged before this existed) fall back to matching on vendor + the
+// purchase date/total that's already written into the notes text.
+function afterpayGroupKey(t){
+  const tagged = /\[apg:([a-z0-9]+)\]/.exec(t.notes||'');
+  if(tagged) return 'apg:'+tagged[1];
+  const legacy = /Afterpay installment \d+ of \d+ \(purchased (\d{4}-\d{2}-\d{2}), total (.+?)\)/.exec(t.notes||'');
+  if(legacy) return 'legacy:'+t.vendor+'|'+legacy[1]+'|'+legacy[2];
+  return null;
+}
+
+function afterpayGroups(){
+  const groups = {};
+  state.transactions.forEach(t=>{
+    const key = afterpayGroupKey(t);
+    if(!key) return;
+    (groups[key] = groups[key] || { vendor: t.vendor, installments: [] }).installments.push(t);
+  });
+  const today = todayStr();
+  return Object.values(groups).map(g=>{
+    g.installments.sort((a,b)=>a.date.localeCompare(b.date));
+    const total = g.installments.reduce((s,t)=>s+t.amount,0);
+    const remaining = g.installments.filter(t=>t.date > today).reduce((s,t)=>s+t.amount,0);
+    const nextInstallment = g.installments.find(t=>t.date > today) || null;
+    return { vendor: g.vendor, total, remaining, nextInstallment, installments: g.installments };
+  })
+  .filter(g => g.remaining > 0.001)
+  .sort((a,b) => (a.nextInstallment?a.nextInstallment.date:'9999-99-99').localeCompare(b.nextInstallment?b.nextInstallment.date:'9999-99-99'));
+}
+
+function totalAfterpayOutstanding(){
+  return afterpayGroups().reduce((s,g)=>s+g.remaining,0);
+}
+
 function scheduledTag(notes){
   return /\(scheduled payment\)/.test(notes||'') ? `<span class="tag" style="color:var(--accent);">Scheduled</span>` : '';
 }
@@ -529,6 +565,8 @@ function renderHeader(){
     }
   }
   if(unreconciled>0) statsHtml += `<div class="stat-chip warn"><b>${unreconciled}</b> unreconciled</div>`;
+  const apOutstanding = totalAfterpayOutstanding();
+  if(apOutstanding>0.001) statsHtml += `<div class="stat-chip"><b>${fmtMoney(apOutstanding)}</b> Afterpay owing</div>`;
   document.getElementById('hdr-substats').innerHTML = statsHtml;
 }
 
@@ -603,8 +641,19 @@ function viewDashboard(){
       }).join('')}
     </div>` : '';
 
+  const afterpaySection = afterpayGroups().length ? `
+    <div class="card">
+      <div class="card-title">Afterpay — still owing</div>
+      ${afterpayGroups().map(g=>`
+        <div class="metric" style="margin-bottom:10px;">
+          <div class="v">${fmtMoney(g.remaining)}</div>
+          <div class="l">${escapeHtml(g.vendor)} \u00b7 ${g.nextInstallment ? `next ${fmtMoney(g.nextInstallment.amount)} on ${fmtDate(g.nextInstallment.date)} via ${escapeHtml(g.nextInstallment.paymentMethod)}` : 'fully charged'}</div>
+        </div>`).join('')}
+    </div>` : '';
+
   return `
     ${accountSections}
+    ${afterpaySection}
     <div class="card">
       <div class="card-title">Spend by payment method — this month</div>
       <div class="grid-2">${methodCards}</div>
@@ -1143,13 +1192,14 @@ function attachHandlers(){
             btn.disabled = false; btn.textContent = 'Save transaction';
             return;
           }
+          const groupId = uid();
           const installments = afterpayInstallments(amount, date).map((inst,i)=>({
             date: inst.date,
             vendor,
             amount: inst.amount,
             paymentMethod: cardName,
             category,
-            notes: (notes ? notes + ' \u00b7 ' : '') + `Afterpay installment ${i+1} of 4 (purchased ${date}, total ${fmtMoney(amount)})`,
+            notes: (notes ? notes + ' \u00b7 ' : '') + `Afterpay installment ${i+1} of 4 (purchased ${date}, total ${fmtMoney(amount)}) [apg:${groupId}]`,
             reconciled: false
           }));
           const data = await apiPost('addTransactions', { data: installments });
