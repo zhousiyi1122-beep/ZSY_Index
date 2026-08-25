@@ -251,6 +251,8 @@ let editingMerchantId = null;
 let editingCategory = null;
 let editingMethod = null;
 let editingCardId = null;
+let editingAccountId = null;
+let editingScheduleId = null;
 
 function uid(){ return Date.now().toString(36) + Math.random().toString(36).slice(2,7); }
 
@@ -258,7 +260,26 @@ function uid(){ return Date.now().toString(36) + Math.random().toString(36).slic
 function getCards(){ return state.settings.cards || []; }
 function findCard(name){ return getCards().find(c=>c.name===name); }
 function isCardMethod(name){ return !!findCard(name); }
-function allPaymentMethodOptions(){ return [...(state.settings.paymentMethods||[]), ...getCards().map(c=>c.name)]; }
+function allPaymentMethodOptions(){ return [...(state.settings.paymentMethods||[]), ...getCards().map(c=>c.name), ...getAccounts().map(a=>a.name)]; }
+
+/* ============ Bank / savings accounts ============ */
+function getAccounts(){ return state.settings.accounts || []; }
+function findAccount(name){ return getAccounts().find(a=>a.name===name); }
+function accountBalance(a){
+  const openingDate = a.openingBalanceDate || '1970-01-01';
+  const spent = state.transactions
+    .filter(t => t.date >= openingDate && t.paymentMethod === a.name)
+    .reduce((sum,t) => sum + t.amount, 0);
+  return Number(a.openingBalance||0) - spent;
+}
+function totalAccountsBalance(){
+  return getAccounts().reduce((sum,a)=> sum + accountBalance(a), 0);
+}
+
+/* ============ Scheduled payments ============ */
+function getSchedules(){ return state.settings.schedules || []; }
+function scheduleMethodOptions(){ return allPaymentMethodOptions().filter(m=>m!=='Afterpay'); }
+function frequencyLabel(f){ return f==='weekly' ? 'Weekly' : f==='fortnightly' ? 'Fortnightly' : 'Monthly'; }
 
 // Afterpay's real schedule: 4 equal payments, 14 days apart, starting on
 // the purchase date. Any odd cent from the split lands on the last payment.
@@ -281,6 +302,10 @@ function afterpayTag(notes){
   return m ? `<span class="tag" style="color:var(--pending);">Afterpay ${m[1]}/${m[2]}</span>` : '';
 }
 
+function scheduledTag(notes){
+  return /\(scheduled payment\)/.test(notes||'') ? `<span class="tag" style="color:var(--accent);">Scheduled</span>` : '';
+}
+
 // One-off migration: older data had a single "Credit Card" payment method
 // with one shared closing day / limit. Turn that into a proper card entry.
 async function migrateLegacyCardIfNeeded(){
@@ -295,6 +320,22 @@ async function migrateLegacyCardIfNeeded(){
   }] : [];
   const paymentMethods = legacyMethods.filter(m=>m!=='Credit Card');
   const data = await apiPost('saveSettings', { data: { cards, paymentMethods } });
+  applyData(data);
+}
+
+// One-off migration: the old single global opening balance (optionally
+// scoped to one payment method) becomes a proper bank account entry.
+async function migrateLegacyAccountIfNeeded(){
+  if(state.settings.accounts !== undefined) return;
+  const accountName = state.settings.openingBalanceMethod || 'Bank Transfer';
+  const accounts = [{
+    id: uid(),
+    name: accountName,
+    openingBalance: Number(state.settings.openingBalance||0),
+    openingBalanceDate: state.settings.openingBalanceDate || todayStr()
+  }];
+  const paymentMethods = (state.settings.paymentMethods||[]).filter(m=>m!==accountName);
+  const data = await apiPost('saveSettings', { data: { accounts, paymentMethods } });
   applyData(data);
 }
 
@@ -408,25 +449,6 @@ async function upsertMerchantFromEntry(name, category, paymentMethod){
   applyData(data);
 }
 
-/* ============ Balance ============ */
-function currentBalance(){
-  const s = state.settings;
-  const openingDate = s.openingBalanceDate || '1970-01-01';
-  const opening = Number(s.openingBalance || 0);
-  const method = s.openingBalanceMethod || '';
-  const spent = state.transactions
-    .filter(t => t.date >= openingDate && (!method || t.paymentMethod === method))
-    .reduce((sum,t) => sum + t.amount, 0);
-  return opening - spent;
-}
-
-// Non-card payment methods only — an opening balance is a cash/bank account
-// you draw down, not a credit card, which starts at $0 owing and is tracked
-// through reconciliation instead.
-function balanceTrackableMethods(){
-  return state.settings.paymentMethods || [];
-}
-
 /* ============ View router ============ */
 function setView(v){
   currentView = v;
@@ -450,11 +472,15 @@ function render(){
 
 /* ============ Header (balance + close countdown) ============ */
 function renderHeader(){
-  const balance = currentBalance();
+  const accounts = getAccounts();
+  const balance = totalAccountsBalance();
   const balEl = document.getElementById('hdr-balance');
   balEl.textContent = fmtMoney(balance);
   balEl.classList.toggle('neg', balance < 0);
-  document.getElementById('hdr-balance-label').textContent = 'balance since ' + fmtDate(state.settings.openingBalanceDate || todayStr()) + (state.settings.openingBalanceMethod ? ' \u00b7 ' + state.settings.openingBalanceMethod : '');
+  document.getElementById('hdr-balance-label').textContent =
+    accounts.length === 0 ? 'no accounts set up' :
+    accounts.length === 1 ? `${escapeHtml(accounts[0].name)} balance` :
+    `combined balance \u00b7 ${accounts.length} accounts`;
 
   const now = todayStr();
   const cards = getCards();
@@ -532,12 +558,18 @@ function viewDashboard(){
       </div>`;
   }).join('');
 
+  const accountSections = getAccounts().map(a=>{
+    const bal = accountBalance(a);
+    return `
+      <div class="card">
+        <div class="card-title">${escapeHtml(a.name)}</div>
+        <div class="mono" style="font-size:24px;font-weight:600;${bal<0?'color:var(--alert);':''}">${fmtMoney(bal)}</div>
+        <div class="helptext">Opening balance ${fmtMoney(Number(a.openingBalance||0))} on ${fmtDate(a.openingBalanceDate||now)}, minus everything logged to ${escapeHtml(a.name)} since. Change this in Settings.</div>
+      </div>`;
+  }).join('') || `<div class="card"><div class="empty">No bank accounts set up yet. Add one in Settings → Bank accounts to track a running balance.</div></div>`;
+
   return `
-    <div class="card">
-      <div class="card-title">Running balance</div>
-      <div class="mono" style="font-size:24px;font-weight:600;${currentBalance()<0?'color:var(--alert);':''}">${fmtMoney(currentBalance())}</div>
-      <div class="helptext">Opening balance ${fmtMoney(Number(state.settings.openingBalance||0))} on ${fmtDate(state.settings.openingBalanceDate||now)}${state.settings.openingBalanceMethod ? ', tracking ' + escapeHtml(state.settings.openingBalanceMethod) + ' only' : ', across all payment methods'}, minus everything logged since. Change this in Settings.</div>
-    </div>
+    ${accountSections}
     <div class="card">
       <div class="card-title">Spend by payment method — this month</div>
       <div class="grid-2">${methodCards}</div>
@@ -615,7 +647,7 @@ function viewLog(){
       <div class="txn-item" data-id="${t.id}">
         <div class="txn-left">
           <div class="vendor">${escapeHtml(t.vendor)}</div>
-          <div class="meta"><span class="tag">${escapeHtml(t.paymentMethod)}</span><span class="tag">${escapeHtml(t.category)}</span>${afterpayTag(t.notes)}</div>
+          <div class="meta"><span class="tag">${escapeHtml(t.paymentMethod)}</span><span class="tag">${escapeHtml(t.category)}</span>${afterpayTag(t.notes)}${scheduledTag(t.notes)}</div>
         </div>
         <div class="txn-right">
           <div class="amt">${fmtMoney(t.amount)}</div>
@@ -754,18 +786,40 @@ function viewSettings(){
   const s = state.settings;
   return `
     <div class="card">
-      <div class="card-title">Opening balance</div>
-      <label for="s-opening">Opening balance (AUD)</label>
-      <input type="number" id="s-opening" class="mono" step="0.01" value="${Number(s.openingBalance||0)}">
-      <label for="s-opening-date">As of date</label>
-      <input type="date" id="s-opening-date" value="${s.openingBalanceDate||todayStr()}">
-      <label for="s-opening-method">Track this balance against</label>
-      <select id="s-opening-method">
-        <option value=""${!s.openingBalanceMethod?' selected':''}>All payment methods combined</option>
-        ${balanceTrackableMethods().map(m=>`<option value="${escapeHtml(m)}"${s.openingBalanceMethod===m?' selected':''}>${escapeHtml(m)}</option>`).join('')}
-      </select>
-      <div class="helptext">Credit cards aren't in this list — they're tracked through statements and reconciliation, not a running balance. Pick the actual cash/bank account this figure belongs to, or leave it combined.</div>
-      <button class="btn" id="save-opening-btn">Save opening balance</button>
+      <div class="card-title">Bank accounts</div>
+      <div class="helptext" style="margin-bottom:10px;">Each account gets its own opening balance and running total. An account's name doubles as its payment method — pick it in Add/Edit for a bank transfer, EFTPOS, etc. against that account.</div>
+      ${getAccounts().length ? getAccounts().map(a=> a.id===editingAccountId ? `
+        <div class="list-row" style="display:block;padding-bottom:14px;">
+          <label for="eacc-name-${a.id}">Account name</label>
+          <input type="text" id="eacc-name-${a.id}" value="${escapeHtml(a.name)}">
+          <label for="eacc-opening-${a.id}">Opening balance (AUD)</label>
+          <input type="number" id="eacc-opening-${a.id}" class="mono" step="0.01" value="${Number(a.openingBalance||0)}">
+          <label for="eacc-date-${a.id}">As of date</label>
+          <input type="date" id="eacc-date-${a.id}" value="${a.openingBalanceDate||todayStr()}">
+          <div class="row-flex" style="margin-top:14px;">
+            <button class="btn" style="margin-top:0;" data-save-account="${a.id}">Save</button>
+            <button class="btn secondary" style="margin-top:0;" data-cancel-account>Cancel</button>
+          </div>
+        </div>` : `
+        <div class="list-row">
+          <div>
+            <div class="n">${escapeHtml(a.name)}</div>
+            <div class="m">Opening ${fmtMoney(a.openingBalance||0)} on ${fmtDate(a.openingBalanceDate||todayStr())} \u00b7 now ${fmtMoney(accountBalance(a))}</div>
+          </div>
+          <div>
+            <button class="x-btn" data-edit-account="${a.id}" style="color:var(--ink-dim);">&#9998;</button>
+            <button class="x-btn" data-remove-account="${a.id}">&times;</button>
+          </div>
+        </div>`).join('') : `<div class="empty">No accounts yet — add one below.</div>`}
+      <div style="margin-top:14px;">
+        <label for="na-name">Account name</label>
+        <input type="text" id="na-name" placeholder="e.g. Business Savings">
+        <label for="na-opening">Opening balance (AUD)</label>
+        <input type="number" id="na-opening" class="mono" step="0.01" placeholder="0.00">
+        <label for="na-date">As of date</label>
+        <input type="date" id="na-date" value="${todayStr()}">
+        <button class="btn secondary" id="add-account-btn" style="margin-top:14px;">Add account</button>
+      </div>
     </div>
 
     <div class="card">
@@ -889,6 +943,63 @@ function viewSettings(){
         <button id="add-method-btn">Add</button>
       </div>
       <div class="helptext" style="margin-top:10px;">Cards are managed separately above — this list is for non-card methods like Cash, Afterpay, or Bank Transfer.</div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Scheduled payments</div>
+      <div class="helptext" style="margin-bottom:10px;">Regular payments — rent, subscriptions, loan repayments — log themselves automatically on their due date, catching up on anything missed since you last opened the app. For true background automation even when the app's closed, open <code>Code.gs</code> in the Apps Script editor, select <code>createDailyScheduleTrigger</code> in the function dropdown, and click Run once (one-time authorization).</div>
+      ${getSchedules().length ? getSchedules().map(sc=> sc.id===editingScheduleId ? `
+        <div class="list-row" style="display:block;padding-bottom:14px;">
+          <label for="esch-vendor-${sc.id}">Vendor</label>
+          <input type="text" id="esch-vendor-${sc.id}" value="${escapeHtml(sc.vendor)}">
+          <label for="esch-amount-${sc.id}">Amount (AUD)</label>
+          <input type="number" id="esch-amount-${sc.id}" class="mono" step="0.01" min="0" value="${sc.amount}">
+          <label for="esch-method-${sc.id}">Payment method</label>
+          <select id="esch-method-${sc.id}">${scheduleMethodOptions().map(m=>`<option value="${escapeHtml(m)}"${m===sc.paymentMethod?' selected':''}>${escapeHtml(m)}</option>`).join('')}</select>
+          <label for="esch-category-${sc.id}">Category</label>
+          <select id="esch-category-${sc.id}">${(s.categories||[]).map(c=>`<option value="${escapeHtml(c)}"${c===sc.category?' selected':''}>${escapeHtml(c)}</option>`).join('')}</select>
+          <label for="esch-freq-${sc.id}">Frequency</label>
+          <select id="esch-freq-${sc.id}">
+            <option value="weekly"${sc.frequency==='weekly'?' selected':''}>Weekly</option>
+            <option value="fortnightly"${sc.frequency==='fortnightly'?' selected':''}>Fortnightly</option>
+            <option value="monthly"${sc.frequency==='monthly'?' selected':''}>Monthly</option>
+          </select>
+          <label for="esch-next-${sc.id}">Next due date</label>
+          <input type="date" id="esch-next-${sc.id}" value="${sc.nextDue}">
+          <div class="row-flex" style="margin-top:14px;">
+            <button class="btn" style="margin-top:0;" data-save-schedule="${sc.id}">Save</button>
+            <button class="btn secondary" style="margin-top:0;" data-cancel-schedule>Cancel</button>
+          </div>
+        </div>` : `
+        <div class="list-row">
+          <div>
+            <div class="n">${escapeHtml(sc.vendor)} \u00b7 ${fmtMoney(sc.amount)}</div>
+            <div class="m">${frequencyLabel(sc.frequency)} \u00b7 ${escapeHtml(sc.paymentMethod)} \u00b7 next ${fmtDate(sc.nextDue)}</div>
+          </div>
+          <div>
+            <button class="x-btn" data-edit-schedule="${sc.id}" style="color:var(--ink-dim);">&#9998;</button>
+            <button class="x-btn" data-remove-schedule="${sc.id}">&times;</button>
+          </div>
+        </div>`).join('') : `<div class="empty">No scheduled payments yet.</div>`}
+      <div style="margin-top:14px;">
+        <label for="ns-vendor">Vendor</label>
+        <input type="text" id="ns-vendor" placeholder="e.g. Xero subscription">
+        <label for="ns-amount">Amount (AUD)</label>
+        <input type="number" id="ns-amount" class="mono" step="0.01" min="0" placeholder="0.00">
+        <label for="ns-method">Payment method</label>
+        <select id="ns-method">${scheduleMethodOptions().map(m=>`<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join('')}</select>
+        <label for="ns-category">Category</label>
+        <select id="ns-category">${(s.categories||[]).map(c=>`<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('')}</select>
+        <label for="ns-freq">Frequency</label>
+        <select id="ns-freq">
+          <option value="weekly">Weekly</option>
+          <option value="fortnightly">Fortnightly</option>
+          <option value="monthly" selected>Monthly</option>
+        </select>
+        <label for="ns-next">First due date</label>
+        <input type="date" id="ns-next" value="${todayStr()}">
+        <button class="btn secondary" id="add-schedule-btn" style="margin-top:14px;">Add scheduled payment</button>
+      </div>
     </div>
 
     <div class="card">
@@ -1036,22 +1147,58 @@ function attachHandlers(){
   }
 
   if(currentView === 'settings'){
-    document.getElementById('save-opening-btn').addEventListener('click', async ()=>{
-      const opening = parseFloat(document.getElementById('s-opening').value);
-      const date = document.getElementById('s-opening-date').value;
-      const method = document.getElementById('s-opening-method').value;
+    document.getElementById('add-account-btn').addEventListener('click', async ()=>{
+      const name = document.getElementById('na-name').value.trim();
+      if(!name) return;
+      if(getAccounts().some(a=>a.name===name) || getCards().some(c=>c.name===name) || (state.settings.paymentMethods||[]).includes(name)){
+        showToast('That name is already in use'); return;
+      }
+      const opening = parseFloat(document.getElementById('na-opening').value);
+      const date = document.getElementById('na-date').value;
       try{
-        const data = await apiPost('saveSettings', { data: { openingBalance: isNaN(opening)?0:opening, openingBalanceDate: date, openingBalanceMethod: method } });
+        const data = await apiPost('addAccount', { data: { name, openingBalance: isNaN(opening)?0:opening, openingBalanceDate: date } });
         applyData(data);
-        showToast('Opening balance saved');
+        showToast('Account added');
         render();
       }catch(err){ setSync('bad'); showToast('Could not save', true); }
+    });
+    document.querySelectorAll('[data-edit-account]').forEach(btn=>{
+      btn.addEventListener('click', ()=>{ editingAccountId = btn.dataset.editAccount; render(); });
+    });
+    document.querySelectorAll('[data-cancel-account]').forEach(btn=>{
+      btn.addEventListener('click', ()=>{ editingAccountId = null; render(); });
+    });
+    document.querySelectorAll('[data-save-account]').forEach(btn=>{
+      btn.addEventListener('click', async ()=>{
+        const id = btn.dataset.saveAccount;
+        const name = document.getElementById(`eacc-name-${id}`).value.trim();
+        const opening = parseFloat(document.getElementById(`eacc-opening-${id}`).value);
+        const date = document.getElementById(`eacc-date-${id}`).value;
+        if(!name) return;
+        try{
+          const data = await apiPost('updateAccount', { data: { id, name, openingBalance: isNaN(opening)?0:opening, openingBalanceDate: date } });
+          applyData(data);
+          editingAccountId = null;
+          showToast('Account updated');
+          render();
+        }catch(err){ setSync('bad'); showToast('Could not save', true); }
+      });
+    });
+    document.querySelectorAll('[data-remove-account]').forEach(btn=>{
+      btn.addEventListener('click', async ()=>{
+        try{
+          const data = await apiPost('deleteAccount', { id: btn.dataset.removeAccount });
+          applyData(data);
+          showToast('Account removed');
+          render();
+        }catch(err){ setSync('bad'); showToast('Could not delete', true); }
+      });
     });
 
     document.getElementById('add-card-btn').addEventListener('click', async ()=>{
       const name = document.getElementById('nc-name').value.trim();
       if(!name) return;
-      if(getCards().some(c=>c.name===name) || (state.settings.paymentMethods||[]).includes(name)){
+      if(getCards().some(c=>c.name===name) || getAccounts().some(a=>a.name===name) || (state.settings.paymentMethods||[]).includes(name)){
         showToast('That name is already in use'); return;
       }
       const closingDay = parseInt(document.getElementById('nc-closing').value, 10) || 15;
@@ -1224,6 +1371,72 @@ function attachHandlers(){
         }catch(err){ setSync('bad'); showToast('Could not save', true); }
       });
     });
+
+    document.getElementById('add-schedule-btn').addEventListener('click', async ()=>{
+      const vendor = document.getElementById('ns-vendor').value.trim();
+      const amount = parseFloat(document.getElementById('ns-amount').value);
+      if(!vendor || isNaN(amount)) return;
+      const schedule = {
+        id: uid(),
+        vendor,
+        amount,
+        paymentMethod: document.getElementById('ns-method').value,
+        category: document.getElementById('ns-category').value,
+        frequency: document.getElementById('ns-freq').value,
+        nextDue: document.getElementById('ns-next').value,
+        notes: '',
+        active: true
+      };
+      const schedules = [...getSchedules(), schedule];
+      try{
+        const data = await apiPost('saveSettings', { data: { schedules } });
+        applyData(data);
+        showToast('Scheduled payment added');
+        render();
+      }catch(err){ setSync('bad'); showToast('Could not save', true); }
+    });
+    document.querySelectorAll('[data-edit-schedule]').forEach(btn=>{
+      btn.addEventListener('click', ()=>{ editingScheduleId = btn.dataset.editSchedule; render(); });
+    });
+    document.querySelectorAll('[data-cancel-schedule]').forEach(btn=>{
+      btn.addEventListener('click', ()=>{ editingScheduleId = null; render(); });
+    });
+    document.querySelectorAll('[data-save-schedule]').forEach(btn=>{
+      btn.addEventListener('click', async ()=>{
+        const id = btn.dataset.saveSchedule;
+        const vendor = document.getElementById(`esch-vendor-${id}`).value.trim();
+        const amount = parseFloat(document.getElementById(`esch-amount-${id}`).value);
+        if(!vendor || isNaN(amount)) return;
+        const schedules = getSchedules().map(sc => sc.id!==id ? sc : {
+          ...sc,
+          vendor,
+          amount,
+          paymentMethod: document.getElementById(`esch-method-${id}`).value,
+          category: document.getElementById(`esch-category-${id}`).value,
+          frequency: document.getElementById(`esch-freq-${id}`).value,
+          nextDue: document.getElementById(`esch-next-${id}`).value
+        });
+        try{
+          const data = await apiPost('saveSettings', { data: { schedules } });
+          applyData(data);
+          editingScheduleId = null;
+          showToast('Scheduled payment updated');
+          render();
+        }catch(err){ setSync('bad'); showToast('Could not save', true); }
+      });
+    });
+    document.querySelectorAll('[data-remove-schedule]').forEach(btn=>{
+      btn.addEventListener('click', async ()=>{
+        const schedules = getSchedules().filter(sc=>sc.id!==btn.dataset.removeSchedule);
+        try{
+          const data = await apiPost('saveSettings', { data: { schedules } });
+          applyData(data);
+          showToast('Scheduled payment removed');
+          render();
+        }catch(err){ setSync('bad'); showToast('Could not delete', true); }
+      });
+    });
+
     document.getElementById('save-api-url-btn').addEventListener('click', ()=>{
       const url = document.getElementById('s-api-url').value.trim();
       setApiUrl(url);
@@ -1328,6 +1541,7 @@ if('serviceWorker' in navigator){
   try{
     await refreshFromApi();
     await migrateLegacyCardIfNeeded();
+    await migrateLegacyAccountIfNeeded();
     setSync('ok');
     render();
   }catch(err){
