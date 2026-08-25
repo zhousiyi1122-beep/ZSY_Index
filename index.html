@@ -563,7 +563,7 @@ function viewDashboard(){
     return `
       <div class="card">
         <div class="card-title">${escapeHtml(a.name)}</div>
-        <div class="mono" style="font-size:24px;font-weight:600;${bal<0?'color:var(--alert);':''}">${fmtMoney(bal)}</div>
+        <div class="mono" style="font-size:18px;font-weight:600;${bal<0?'color:var(--alert);':''}">${fmtMoney(bal)}</div>
         <div class="helptext">Opening balance ${fmtMoney(Number(a.openingBalance||0))} on ${fmtDate(a.openingBalanceDate||now)}, minus everything logged to ${escapeHtml(a.name)} since. Change this in Settings.</div>
       </div>`;
   }).join('') || `<div class="card"><div class="empty">No bank accounts set up yet. Add one in Settings → Bank accounts to track a running balance.</div></div>`;
