@@ -260,6 +260,27 @@ function findCard(name){ return getCards().find(c=>c.name===name); }
 function isCardMethod(name){ return !!findCard(name); }
 function allPaymentMethodOptions(){ return [...(state.settings.paymentMethods||[]), ...getCards().map(c=>c.name)]; }
 
+// Afterpay's real schedule: 4 equal payments, 14 days apart, starting on
+// the purchase date. Any odd cent from the split lands on the last payment.
+function afterpayInstallments(total, startDate){
+  const cents = Math.round(total*100);
+  const base = Math.floor(cents/4);
+  const remainder = cents - base*4;
+  const amounts = [base,base,base,base];
+  for(let i=0;i<remainder;i++) amounts[3-i] += 1;
+  return amounts.map((c,i)=>{
+    const d = new Date(startDate+'T00:00:00');
+    d.setDate(d.getDate() + i*14);
+    const dateStr = d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+    return { date: dateStr, amount: c/100 };
+  });
+}
+
+function afterpayTag(notes){
+  const m = /Afterpay installment (\d+) of (\d+)/.exec(notes||'');
+  return m ? `<span class="tag" style="color:var(--pending);">Afterpay ${m[1]}/${m[2]}</span>` : '';
+}
+
 // One-off migration: older data had a single "Credit Card" payment method
 // with one shared closing day / limit. Turn that into a proper card entry.
 async function migrateLegacyCardIfNeeded(){
@@ -533,7 +554,9 @@ function viewDashboard(){
 function viewAdd(){
   const cats = state.settings.categories||[];
   const methods = allPaymentMethodOptions();
+  const cards = getCards();
   const merchantOptions = state.merchants.map(m=>`<option value="${escapeHtml(m.name)}">`).join('');
+  const defaultMethod = methods[0];
   return `
     <div class="card">
       <div class="card-title">New transaction</div>
@@ -551,7 +574,15 @@ function viewAdd(){
 
         <label>Method of payment</label>
         <div class="pill-group" id="f-method-group">
-          ${methods.map((m,i)=>`<div class="pill${i===1?' active':''}" data-value="${escapeHtml(m)}">${escapeHtml(m)}</div>`).join('')}
+          ${methods.map((m,i)=>`<div class="pill${i===0?' active':''}" data-value="${escapeHtml(m)}">${escapeHtml(m)}</div>`).join('')}
+        </div>
+
+        <div id="afterpay-section" style="display:${defaultMethod==='Afterpay'?'block':'none'};">
+          ${cards.length ? `
+            <label for="f-afterpay-card">Charge installments to</label>
+            <select id="f-afterpay-card">${cards.map(c=>`<option value="${escapeHtml(c.name)}">${escapeHtml(c.name)}</option>`).join('')}</select>
+            <div class="helptext">Splits into 4 equal payments, two weeks apart, charged to this card — each one lands in that card's own statement and reconciliation.</div>
+          ` : `<div class="helptext" style="color:var(--pending);">Add a credit card in Settings first — Afterpay installments need one to charge to.</div>`}
         </div>
 
         <label>Category of goods / services</label>
@@ -584,7 +615,7 @@ function viewLog(){
       <div class="txn-item" data-id="${t.id}">
         <div class="txn-left">
           <div class="vendor">${escapeHtml(t.vendor)}</div>
-          <div class="meta"><span class="tag">${escapeHtml(t.paymentMethod)}</span><span class="tag">${escapeHtml(t.category)}</span></div>
+          <div class="meta"><span class="tag">${escapeHtml(t.paymentMethod)}</span><span class="tag">${escapeHtml(t.category)}</span>${afterpayTag(t.notes)}</div>
         </div>
         <div class="txn-right">
           <div class="amt">${fmtMoney(t.amount)}</div>
@@ -882,6 +913,8 @@ function attachHandlers(){
       p.addEventListener('click', ()=>{
         document.querySelectorAll('#f-method-group .pill').forEach(x=>x.classList.remove('active'));
         p.classList.add('active');
+        const section = document.getElementById('afterpay-section');
+        if(section) section.style.display = (p.dataset.value === 'Afterpay') ? 'block' : 'none';
       });
     });
     document.querySelectorAll('#f-category-group .pill').forEach(p=>{
@@ -896,6 +929,8 @@ function attachHandlers(){
       if(m){
         document.querySelectorAll('#f-method-group .pill').forEach(x=>x.classList.toggle('active', x.dataset.value===m.paymentMethod));
         document.querySelectorAll('#f-category-group .pill').forEach(x=>x.classList.toggle('active', x.dataset.value===m.category));
+        const section = document.getElementById('afterpay-section');
+        if(section) section.style.display = (m.paymentMethod === 'Afterpay') ? 'block' : 'none';
       }
     });
     document.getElementById('add-form').addEventListener('submit', async (e)=>{
@@ -910,10 +945,33 @@ function attachHandlers(){
       const btn = document.getElementById('add-submit-btn');
       btn.disabled = true; btn.textContent = 'Saving…';
       try{
-        const data = await apiPost('addTransaction', { data: { date, vendor, amount, paymentMethod: method, category, notes, reconciled:false } });
-        applyData(data);
-        await upsertMerchantFromEntry(vendor, category, method);
-        showToast('Transaction saved');
+        if(method === 'Afterpay'){
+          const cardSelect = document.getElementById('f-afterpay-card');
+          const cardName = cardSelect ? cardSelect.value : null;
+          if(!cardName){
+            showToast('Add a credit card first — Afterpay needs one to charge to', true);
+            btn.disabled = false; btn.textContent = 'Save transaction';
+            return;
+          }
+          const installments = afterpayInstallments(amount, date).map((inst,i)=>({
+            date: inst.date,
+            vendor,
+            amount: inst.amount,
+            paymentMethod: cardName,
+            category,
+            notes: (notes ? notes + ' \u00b7 ' : '') + `Afterpay installment ${i+1} of 4 (purchased ${date}, total ${fmtMoney(amount)})`,
+            reconciled: false
+          }));
+          const data = await apiPost('addTransactions', { data: installments });
+          applyData(data);
+          await upsertMerchantFromEntry(vendor, category, 'Afterpay');
+          showToast('Split into 4 Afterpay installments');
+        } else {
+          const data = await apiPost('addTransaction', { data: { date, vendor, amount, paymentMethod: method, category, notes, reconciled:false } });
+          applyData(data);
+          await upsertMerchantFromEntry(vendor, category, method);
+          showToast('Transaction saved');
+        }
         setView('log');
       }catch(err){
         setSync('bad');
