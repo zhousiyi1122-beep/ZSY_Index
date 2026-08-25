@@ -252,6 +252,7 @@ let editingCategory = null;
 let editingMethod = null;
 let editingCardId = null;
 let editingAccountId = null;
+let editingGiftCardId = null;
 let editingScheduleId = null;
 
 function uid(){ return Date.now().toString(36) + Math.random().toString(36).slice(2,7); }
@@ -260,7 +261,7 @@ function uid(){ return Date.now().toString(36) + Math.random().toString(36).slic
 function getCards(){ return state.settings.cards || []; }
 function findCard(name){ return getCards().find(c=>c.name===name); }
 function isCardMethod(name){ return !!findCard(name); }
-function allPaymentMethodOptions(){ return [...(state.settings.paymentMethods||[]), ...getCards().map(c=>c.name), ...getAccounts().map(a=>a.name)]; }
+function allPaymentMethodOptions(){ return [...(state.settings.paymentMethods||[]), ...getCards().map(c=>c.name), ...getAccounts().map(a=>a.name), ...getGiftCards().map(g=>g.name)]; }
 
 /* ============ Bank / savings accounts ============ */
 function getAccounts(){ return state.settings.accounts || []; }
@@ -274,6 +275,27 @@ function accountBalance(a){
 }
 function totalAccountsBalance(){
   return getAccounts().reduce((sum,a)=> sum + accountBalance(a), 0);
+}
+
+/* ============ Gift cards ============ */
+// Loading a gift card is a transfer (money moves from a credit card into
+// prepaid value) — not a spend, so its transaction is filed under a fixed
+// "Gift Cards Loaded" category. Redeeming it — picking the gift card as
+// the payment method on a normal transaction — is the real expense.
+const GIFT_CARD_LOAD_CATEGORY = 'Gift Cards Loaded';
+function getGiftCards(){ return state.settings.giftCards || []; }
+function findGiftCard(name){ return getGiftCards().find(g=>g.name===name); }
+function isGiftCardMethod(name){ return !!findGiftCard(name); }
+function giftCardBalance(g){
+  const redeemed = state.transactions
+    .filter(t => t.paymentMethod === g.name)
+    .reduce((sum,t) => sum + t.amount, 0);
+  return Number(g.loadedAmount||0) - redeemed;
+}
+function giftCardTag(t){
+  if(t.category === GIFT_CARD_LOAD_CATEGORY) return `<span class="tag" style="color:var(--accent);">Gift card loaded</span>`;
+  if(isGiftCardMethod(t.paymentMethod)) return `<span class="tag" style="color:var(--accent);">Gift card redemption</span>`;
+  return '';
 }
 
 /* ============ Scheduled payments ============ */
@@ -568,6 +590,19 @@ function viewDashboard(){
       </div>`;
   }).join('') || `<div class="card"><div class="empty">No bank accounts set up yet. Add one in Settings → Bank accounts to track a running balance.</div></div>`;
 
+  const giftCardSections = getGiftCards().length ? `
+    <div class="card">
+      <div class="card-title">Gift cards</div>
+      ${getGiftCards().map(g=>{
+        const bal = giftCardBalance(g);
+        return `
+          <div class="metric" style="margin-bottom:10px;">
+            <div class="v">${fmtMoney(bal)}</div>
+            <div class="l">${escapeHtml(g.name)} \u00b7 loaded ${fmtMoney(g.loadedAmount)} via ${escapeHtml(g.cardName)}</div>
+          </div>`;
+      }).join('')}
+    </div>` : '';
+
   return `
     ${accountSections}
     <div class="card">
@@ -579,6 +614,7 @@ function viewDashboard(){
       ${catBars}
     </div>
     ${cardSections}
+    ${giftCardSections}
   `;
 }
 
@@ -647,7 +683,7 @@ function viewLog(){
       <div class="txn-item" data-id="${t.id}">
         <div class="txn-left">
           <div class="vendor">${escapeHtml(t.vendor)}</div>
-          <div class="meta"><span class="tag">${escapeHtml(t.paymentMethod)}</span><span class="tag">${escapeHtml(t.category)}</span>${afterpayTag(t.notes)}${scheduledTag(t.notes)}</div>
+          <div class="meta"><span class="tag">${escapeHtml(t.paymentMethod)}</span><span class="tag">${escapeHtml(t.category)}</span>${afterpayTag(t.notes)}${scheduledTag(t.notes)}${giftCardTag(t)}</div>
         </div>
         <div class="txn-right">
           <div class="amt">${fmtMoney(t.amount)}</div>
@@ -856,6 +892,49 @@ function viewSettings(){
         <label for="nc-limit">Credit limit (optional)</label>
         <input type="number" id="nc-limit" class="mono" step="0.01" min="0" placeholder="e.g. 10000">
         <button class="btn secondary" id="add-card-btn" style="margin-top:14px;">Add card</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Gift cards</div>
+      <div class="helptext" style="margin-bottom:10px;">Loading a gift card charges the credit card you pick but doesn't count as spend yet — it's filed under "${GIFT_CARD_LOAD_CATEGORY}". When you actually redeem it, pick the gift card as the payment method on a normal transaction with the real category — that's when it counts as an expense.</div>
+      ${getGiftCards().length ? getGiftCards().map(g=> g.id===editingGiftCardId ? `
+        <div class="list-row" style="display:block;padding-bottom:14px;">
+          <label for="egc-name-${g.id}">Gift card name</label>
+          <input type="text" id="egc-name-${g.id}" value="${escapeHtml(g.name)}">
+          <label for="egc-amount-${g.id}">Loaded amount (AUD)</label>
+          <input type="number" id="egc-amount-${g.id}" class="mono" step="0.01" min="0" value="${g.loadedAmount}">
+          <label for="egc-date-${g.id}">Date loaded</label>
+          <input type="date" id="egc-date-${g.id}" value="${g.loadedDate}">
+          <label for="egc-card-${g.id}">Loaded via card</label>
+          <select id="egc-card-${g.id}">${getCards().map(c=>`<option value="${escapeHtml(c.name)}"${c.name===g.cardName?' selected':''}>${escapeHtml(c.name)}</option>`).join('')}</select>
+          <div class="row-flex" style="margin-top:14px;">
+            <button class="btn" style="margin-top:0;" data-save-giftcard="${g.id}">Save</button>
+            <button class="btn secondary" style="margin-top:0;" data-cancel-giftcard>Cancel</button>
+          </div>
+        </div>` : `
+        <div class="list-row">
+          <div>
+            <div class="n">${escapeHtml(g.name)}</div>
+            <div class="m">Loaded ${fmtMoney(g.loadedAmount)} via ${escapeHtml(g.cardName)} on ${fmtDate(g.loadedDate)} \u00b7 ${fmtMoney(giftCardBalance(g))} remaining</div>
+          </div>
+          <div>
+            <button class="x-btn" data-edit-giftcard="${g.id}" style="color:var(--ink-dim);">&#9998;</button>
+            <button class="x-btn" data-remove-giftcard="${g.id}">&times;</button>
+          </div>
+        </div>`).join('') : `<div class="empty">No gift cards yet.</div>`}
+      <div style="margin-top:14px;">
+        ${getCards().length ? `
+          <label for="ng-name">Gift card name</label>
+          <input type="text" id="ng-name" placeholder="e.g. iTunes Gift Card">
+          <label for="ng-amount">Loaded amount (AUD)</label>
+          <input type="number" id="ng-amount" class="mono" step="0.01" min="0" placeholder="0.00">
+          <label for="ng-date">Date loaded</label>
+          <input type="date" id="ng-date" value="${todayStr()}">
+          <label for="ng-card">Loaded via card</label>
+          <select id="ng-card">${getCards().map(c=>`<option value="${escapeHtml(c.name)}">${escapeHtml(c.name)}</option>`).join('')}</select>
+          <button class="btn secondary" id="add-giftcard-btn" style="margin-top:14px;">Load gift card</button>
+        ` : `<div class="helptext" style="color:var(--pending);">Add a credit card above first — gift cards need one to charge to.</div>`}
       </div>
     </div>
 
@@ -1238,6 +1317,60 @@ function attachHandlers(){
           const data = await apiPost('deleteCard', { id: btn.dataset.removeCard });
           applyData(data);
           showToast('Card removed');
+          render();
+        }catch(err){ setSync('bad'); showToast('Could not delete', true); }
+      });
+    });
+
+    const addGiftCardBtn = document.getElementById('add-giftcard-btn');
+    if(addGiftCardBtn){
+      addGiftCardBtn.addEventListener('click', async ()=>{
+        const name = document.getElementById('ng-name').value.trim();
+        if(!name) return;
+        if(allPaymentMethodOptions().includes(name)){
+          showToast('That name is already in use'); return;
+        }
+        const loadedAmount = parseFloat(document.getElementById('ng-amount').value);
+        if(isNaN(loadedAmount)) return;
+        const loadedDate = document.getElementById('ng-date').value;
+        const cardName = document.getElementById('ng-card').value;
+        try{
+          const data = await apiPost('addGiftCard', { data: { name, loadedAmount, loadedDate, cardName } });
+          applyData(data);
+          showToast('Gift card loaded');
+          render();
+        }catch(err){ setSync('bad'); showToast('Could not save', true); }
+      });
+    }
+    document.querySelectorAll('[data-edit-giftcard]').forEach(btn=>{
+      btn.addEventListener('click', ()=>{ editingGiftCardId = btn.dataset.editGiftcard; render(); });
+    });
+    document.querySelectorAll('[data-cancel-giftcard]').forEach(btn=>{
+      btn.addEventListener('click', ()=>{ editingGiftCardId = null; render(); });
+    });
+    document.querySelectorAll('[data-save-giftcard]').forEach(btn=>{
+      btn.addEventListener('click', async ()=>{
+        const id = btn.dataset.saveGiftcard;
+        const name = document.getElementById(`egc-name-${id}`).value.trim();
+        const loadedAmount = parseFloat(document.getElementById(`egc-amount-${id}`).value);
+        const loadedDate = document.getElementById(`egc-date-${id}`).value;
+        const cardName = document.getElementById(`egc-card-${id}`).value;
+        if(!name || isNaN(loadedAmount)) return;
+        try{
+          const data = await apiPost('updateGiftCard', { data: { id, name, loadedAmount, loadedDate, cardName } });
+          applyData(data);
+          editingGiftCardId = null;
+          showToast('Gift card updated');
+          render();
+        }catch(err){ setSync('bad'); showToast('Could not save', true); }
+      });
+    });
+    document.querySelectorAll('[data-remove-giftcard]').forEach(btn=>{
+      btn.addEventListener('click', async ()=>{
+        try{
+          const data = await apiPost('deleteGiftCard', { id: btn.dataset.removeGiftcard });
+          applyData(data);
+          showToast('Gift card removed');
           render();
         }catch(err){ setSync('bad'); showToast('Could not delete', true); }
       });
