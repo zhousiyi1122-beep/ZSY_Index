@@ -297,6 +297,34 @@ function giftCardTag(t){
   if(isGiftCardMethod(t.paymentMethod)) return `<span class="tag" style="color:var(--accent);">Gift card redemption</span>`;
   return '';
 }
+// Anything except another gift card or Afterpay can fund a gift card:
+// Cash, Debit Card, Bank Transfer, a credit card, or a bank account.
+function giftCardFundingOptions(){
+  return allPaymentMethodOptions().filter(m => !isGiftCardMethod(m) && m !== 'Afterpay');
+}
+
+/* ============ Transfers ============ */
+// Moving money between accounts/cash isn't a spend, so it's filed under a
+// fixed category and kept out of the real spend breakdown. Only sides that
+// actually track a balance (an account, or a card for something like a
+// cash advance) get a transaction — Cash, Debit Card, and Bank Transfer
+// have no ledger of their own, so nothing is recorded on that side.
+const TRANSFER_CATEGORY = 'Internal Transfer';
+function transferSourceOptions(){
+  return allPaymentMethodOptions().filter(m => !isGiftCardMethod(m) && m !== 'Afterpay');
+}
+function transferDestinationOptions(){
+  const opts = [];
+  if((state.settings.paymentMethods||[]).includes('Cash')) opts.push('Cash');
+  getAccounts().forEach(a=>opts.push(a.name));
+  return opts;
+}
+async function ensureTransferCategory(){
+  if((state.settings.categories||[]).includes(TRANSFER_CATEGORY)) return;
+  const categories = [...(state.settings.categories||[]), TRANSFER_CATEGORY];
+  const data = await apiPost('saveSettings', { data: { categories } });
+  applyData(data);
+}
 
 /* ============ Scheduled payments ============ */
 function getSchedules(){ return state.settings.schedules || []; }
@@ -908,6 +936,20 @@ function viewSettings(){
     </div>
 
     <div class="card">
+      <div class="card-title">Transfer money</div>
+      <div class="helptext" style="margin-bottom:10px;">Move money between accounts and cash without it counting as spend — filed under "${TRANSFER_CATEGORY}". Only sides that actually track a balance get a record; Cash, Debit Card, and Bank Transfer have no ledger of their own.</div>
+      <label for="tr-from">From</label>
+      <select id="tr-from">${transferSourceOptions().map(m=>`<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join('')}</select>
+      <label for="tr-to">To</label>
+      <select id="tr-to">${transferDestinationOptions().map(m=>`<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join('')}</select>
+      <label for="tr-amount">Amount (AUD)</label>
+      <input type="number" id="tr-amount" class="mono" step="0.01" min="0" placeholder="0.00">
+      <label for="tr-date">Date</label>
+      <input type="date" id="tr-date" value="${todayStr()}">
+      <button class="btn secondary" id="do-transfer-btn" style="margin-top:14px;">Transfer</button>
+    </div>
+
+    <div class="card">
       <div class="card-title">Credit cards</div>
       <div class="helptext" style="margin-bottom:10px;">Each card gets its own closing date, credit limit, and reconciliation periods. A card's name doubles as its payment method — pick it in Add/Edit just like Cash or Afterpay.</div>
       ${getCards().length ? getCards().map(c=> c.id===editingCardId ? `
@@ -946,7 +988,7 @@ function viewSettings(){
 
     <div class="card">
       <div class="card-title">Gift cards</div>
-      <div class="helptext" style="margin-bottom:10px;">Loading a gift card charges the credit card you pick but doesn't count as spend yet — it's filed under "${GIFT_CARD_LOAD_CATEGORY}". When you actually redeem it, pick the gift card as the payment method on a normal transaction with the real category — that's when it counts as an expense.</div>
+      <div class="helptext" style="margin-bottom:10px;">Loading a gift card charges the source you pick but doesn't count as spend yet — it's filed under "${GIFT_CARD_LOAD_CATEGORY}". When you actually redeem it, pick the gift card as the payment method on a normal transaction with the real category — that's when it counts as an expense.</div>
       ${getGiftCards().length ? getGiftCards().map(g=> g.id===editingGiftCardId ? `
         <div class="list-row" style="display:block;padding-bottom:14px;">
           <label for="egc-name-${g.id}">Gift card name</label>
@@ -955,8 +997,8 @@ function viewSettings(){
           <input type="number" id="egc-amount-${g.id}" class="mono" step="0.01" min="0" value="${g.loadedAmount}">
           <label for="egc-date-${g.id}">Date loaded</label>
           <input type="date" id="egc-date-${g.id}" value="${g.loadedDate}">
-          <label for="egc-card-${g.id}">Loaded via card</label>
-          <select id="egc-card-${g.id}">${getCards().map(c=>`<option value="${escapeHtml(c.name)}"${c.name===g.cardName?' selected':''}>${escapeHtml(c.name)}</option>`).join('')}</select>
+          <label for="egc-card-${g.id}">Funding source</label>
+          <select id="egc-card-${g.id}">${giftCardFundingOptions().map(m=>`<option value="${escapeHtml(m)}"${m===g.cardName?' selected':''}>${escapeHtml(m)}</option>`).join('')}</select>
           <div class="row-flex" style="margin-top:14px;">
             <button class="btn" style="margin-top:0;" data-save-giftcard="${g.id}">Save</button>
             <button class="btn secondary" style="margin-top:0;" data-cancel-giftcard>Cancel</button>
@@ -973,17 +1015,17 @@ function viewSettings(){
           </div>
         </div>`).join('') : `<div class="empty">No gift cards yet.</div>`}
       <div style="margin-top:14px;">
-        ${getCards().length ? `
+        ${giftCardFundingOptions().length ? `
           <label for="ng-name">Gift card name</label>
           <input type="text" id="ng-name" placeholder="e.g. iTunes Gift Card">
           <label for="ng-amount">Loaded amount (AUD)</label>
           <input type="number" id="ng-amount" class="mono" step="0.01" min="0" placeholder="0.00">
           <label for="ng-date">Date loaded</label>
           <input type="date" id="ng-date" value="${todayStr()}">
-          <label for="ng-card">Loaded via card</label>
-          <select id="ng-card">${getCards().map(c=>`<option value="${escapeHtml(c.name)}">${escapeHtml(c.name)}</option>`).join('')}</select>
+          <label for="ng-card">Funding source</label>
+          <select id="ng-card">${giftCardFundingOptions().map(m=>`<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join('')}</select>
           <button class="btn secondary" id="add-giftcard-btn" style="margin-top:14px;">Load gift card</button>
-        ` : `<div class="helptext" style="color:var(--pending);">Add a credit card above first — gift cards need one to charge to.</div>`}
+        ` : `<div class="helptext" style="color:var(--pending);">Add a payment method first — gift cards need a source to charge to.</div>`}
       </div>
     </div>
 
@@ -1276,6 +1318,40 @@ function attachHandlers(){
   }
 
   if(currentView === 'settings'){
+    document.getElementById('do-transfer-btn').addEventListener('click', async ()=>{
+      const from = document.getElementById('tr-from').value;
+      const to = document.getElementById('tr-to').value;
+      const amount = parseFloat(document.getElementById('tr-amount').value);
+      const date = document.getElementById('tr-date').value;
+      if(!from || !to || from === to){ showToast('Pick two different sides to transfer between', true); return; }
+      if(isNaN(amount) || amount <= 0){ showToast('Enter a valid amount', true); return; }
+      const btn = document.getElementById('do-transfer-btn');
+      btn.disabled = true; btn.textContent = 'Transferring…';
+      try{
+        await ensureTransferCategory();
+        const txns = [];
+        if(findAccount(from) || findCard(from)){
+          txns.push({ date, vendor: `Transfer to ${to}`, amount, paymentMethod: from, category: TRANSFER_CATEGORY, notes: '', reconciled:false });
+        }
+        if(findAccount(to)){
+          txns.push({ date, vendor: `Transfer from ${from}`, amount: -amount, paymentMethod: to, category: TRANSFER_CATEGORY, notes: '', reconciled:false });
+        }
+        if(txns.length){
+          const data = await apiPost('addTransactions', { data: txns });
+          applyData(data);
+          showToast('Transfer recorded');
+        } else {
+          showToast('Nothing to record \u2014 neither side tracks a balance');
+        }
+        render();
+      }catch(err){
+        setSync('bad');
+        showToast('Could not save', true);
+      } finally {
+        btn.disabled = false; btn.textContent = 'Transfer';
+      }
+    });
+
     document.getElementById('add-account-btn').addEventListener('click', async ()=>{
       const name = document.getElementById('na-name').value.trim();
       if(!name) return;
