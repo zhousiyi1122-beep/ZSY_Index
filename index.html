@@ -297,27 +297,24 @@ function giftCardTag(t){
   if(isGiftCardMethod(t.paymentMethod)) return `<span class="tag" style="color:var(--accent);">Gift card redemption</span>`;
   return '';
 }
-// Anything except another gift card or Afterpay can fund a gift card:
-// Cash, Debit Card, Bank Transfer, a credit card, or a bank account.
+// Same full, live list as Transfer money — any current payment method
+// except Afterpay (its 4-installment split doesn't fit a single amount).
 function giftCardFundingOptions(){
-  return allPaymentMethodOptions().filter(m => !isGiftCardMethod(m) && m !== 'Afterpay');
+  return allPaymentMethodOptions().filter(m => m !== 'Afterpay');
 }
 
 /* ============ Transfers ============ */
-// Moving money between accounts/cash isn't a spend, so it's filed under a
+// Moving money between payment methods isn't a spend, so it's filed under a
 // fixed category and kept out of the real spend breakdown. Only sides that
-// actually track a balance (an account, or a card for something like a
-// cash advance) get a transaction — Cash, Debit Card, and Bank Transfer
-// have no ledger of their own, so nothing is recorded on that side.
+// actually track a balance (an account, a card, or a gift card) get a
+// transaction — Cash, Debit Card, and Bank Transfer have no ledger of
+// their own, so nothing is recorded on that side.
 const TRANSFER_CATEGORY = 'Internal Transfer';
-function transferSourceOptions(){
-  return allPaymentMethodOptions().filter(m => !isGiftCardMethod(m) && m !== 'Afterpay');
+function transferMethodOptions(){
+  return allPaymentMethodOptions().filter(m => m !== 'Afterpay');
 }
-function transferDestinationOptions(){
-  const opts = [];
-  if((state.settings.paymentMethods||[]).includes('Cash')) opts.push('Cash');
-  getAccounts().forEach(a=>opts.push(a.name));
-  return opts;
+function hasLedger(name){
+  return !!(findAccount(name) || findCard(name) || isGiftCardMethod(name));
 }
 async function ensureTransferCategory(){
   if((state.settings.categories||[]).includes(TRANSFER_CATEGORY)) return;
@@ -939,9 +936,9 @@ function viewSettings(){
       <div class="card-title">Transfer money</div>
       <div class="helptext" style="margin-bottom:10px;">Move money between accounts and cash without it counting as spend — filed under "${TRANSFER_CATEGORY}". Only sides that actually track a balance get a record; Cash, Debit Card, and Bank Transfer have no ledger of their own.</div>
       <label for="tr-from">From</label>
-      <select id="tr-from">${transferSourceOptions().map(m=>`<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join('')}</select>
+      <select id="tr-from">${transferMethodOptions().map(m=>`<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join('')}</select>
       <label for="tr-to">To</label>
-      <select id="tr-to">${transferDestinationOptions().map(m=>`<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join('')}</select>
+      <select id="tr-to">${transferMethodOptions().map(m=>`<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join('')}</select>
       <label for="tr-amount">Amount (AUD)</label>
       <input type="number" id="tr-amount" class="mono" step="0.01" min="0" placeholder="0.00">
       <label for="tr-date">Date</label>
@@ -1330,10 +1327,10 @@ function attachHandlers(){
       try{
         await ensureTransferCategory();
         const txns = [];
-        if(findAccount(from) || findCard(from)){
+        if(hasLedger(from)){
           txns.push({ date, vendor: `Transfer to ${to}`, amount, paymentMethod: from, category: TRANSFER_CATEGORY, notes: '', reconciled:false });
         }
-        if(findAccount(to)){
+        if(hasLedger(to)){
           txns.push({ date, vendor: `Transfer from ${from}`, amount: -amount, paymentMethod: to, category: TRANSFER_CATEGORY, notes: '', reconciled:false });
         }
         if(txns.length){
