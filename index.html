@@ -155,6 +155,7 @@
 
   .list-row{display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid var(--line);}
   .list-row:last-child{border-bottom:none;}
+  .row-actions{display:flex;align-items:center;gap:2px;flex-shrink:0;align-self:flex-start;}
   .list-row .n{font-size:14px;}
   .list-row .m{font-size:11.5px;color:var(--ink-dim);margin-top:2px;}
   .x-btn{background:none;border:none;color:var(--alert);font-size:18px;cursor:pointer;padding:4px 8px;}
@@ -301,6 +302,12 @@ function giftCardTag(t){
 // except Afterpay (its 4-installment split doesn't fit a single amount).
 function giftCardFundingOptions(){
   return allPaymentMethodOptions().filter(m => m !== 'Afterpay');
+}
+// Categories used automatically by Transfers/Gift Cards are left out of
+// the manual picker — they still exist in Settings and still work, just
+// aren't offered as something to hand-pick for an ordinary purchase.
+function manualCategoryOptions(){
+  return (state.settings.categories||[]).filter(c => c !== TRANSFER_CATEGORY && c !== GIFT_CARD_LOAD_CATEGORY);
 }
 
 /* ============ Transfers ============ */
@@ -471,6 +478,11 @@ function showToast(msg, isError){
   showToast._h = setTimeout(()=>t.classList.remove('show'), 2200);
 }
 
+/* ============ Delete confirmation ============ */
+function confirmDelete(msg){
+  return window.confirm(msg);
+}
+
 /* ============ Formatting helpers ============ */
 function fmtMoney(n){
   const sign = n < 0 ? '-' : '';
@@ -599,7 +611,11 @@ function renderHeader(){
 function viewDashboard(){
   const now = todayStr();
   const cards = getCards();
-  const monthTxns = state.transactions.filter(t => t.date.slice(0,7) === now.slice(0,7));
+  // Internal transfers move money between your own accounts/cards — not a
+  // real expense — so they're kept out of both spend widgets below. They
+  // still count normally toward account balances, card statements, and
+  // reconciliation, which is computed separately from this.
+  const monthTxns = state.transactions.filter(t => t.date.slice(0,7) === now.slice(0,7) && t.category !== TRANSFER_CATEGORY);
   const methodList = allPaymentMethodOptions();
   const byMethod = {};
   methodList.forEach(m => byMethod[m] = 0);
@@ -694,7 +710,7 @@ function viewDashboard(){
 
 /* ============ Add Transaction ============ */
 function viewAdd(){
-  const cats = state.settings.categories||[];
+  const cats = manualCategoryOptions();
   const methods = allPaymentMethodOptions();
   const cards = getCards();
   const merchantOptions = state.merchants.map(m=>`<option value="${escapeHtml(m.name)}">`).join('');
@@ -773,7 +789,13 @@ function viewLog(){
 function viewEditTxn(id){
   const t = state.transactions.find(x=>String(x.id)===String(id));
   if(!t) return `<div class="card"><div class="empty">Transaction not found.</div></div>`;
-  const cats = state.settings.categories||[];
+  const cats = manualCategoryOptions();
+  // If this transaction already carries a system category (from a transfer
+  // or gift card load), keep it selectable here even though it's hidden
+  // from the picker for new transactions.
+  if(!cats.includes(t.category) && (t.category===TRANSFER_CATEGORY || t.category===GIFT_CARD_LOAD_CATEGORY)){
+    cats.unshift(t.category);
+  }
   const methods = allPaymentMethodOptions();
   return `
     <div class="card">
@@ -803,6 +825,7 @@ function viewEditTxn(id){
 
         <div class="row-flex" style="margin-top:18px;">
           <button type="submit" class="btn" style="margin-top:0;">Save changes</button>
+          <button type="button" class="btn secondary" style="margin-top:0;" id="cancel-edit-btn">Cancel</button>
         </div>
         <button type="button" class="btn danger" id="delete-txn-btn">Delete transaction</button>
       </form>
@@ -916,7 +939,7 @@ function viewSettings(){
             <div class="n">${escapeHtml(a.name)}</div>
             <div class="m">Opening ${fmtMoney(a.openingBalance||0)} on ${fmtDate(a.openingBalanceDate||todayStr())} \u00b7 now ${fmtMoney(accountBalance(a))}</div>
           </div>
-          <div>
+          <div class="row-actions">
             <button class="x-btn" data-edit-account="${a.id}" style="color:var(--ink-dim);">&#9998;</button>
             <button class="x-btn" data-remove-account="${a.id}">&times;</button>
           </div>
@@ -943,6 +966,8 @@ function viewSettings(){
       <input type="number" id="tr-amount" class="mono" step="0.01" min="0" placeholder="0.00">
       <label for="tr-date">Date</label>
       <input type="date" id="tr-date" value="${todayStr()}">
+      <label for="tr-notes">Notes (optional)</label>
+      <textarea id="tr-notes" rows="2" placeholder="What this transfer was for"></textarea>
       <button class="btn secondary" id="do-transfer-btn" style="margin-top:14px;">Transfer</button>
     </div>
 
@@ -967,7 +992,7 @@ function viewSettings(){
             <div class="n">${escapeHtml(c.name)}</div>
             <div class="m">Closes on the ${c.closingDay||15}${c.creditLimit?` \u00b7 limit ${fmtMoney(c.creditLimit)}`:''}</div>
           </div>
-          <div>
+          <div class="row-actions">
             <button class="x-btn" data-edit-card="${c.id}" style="color:var(--ink-dim);">&#9998;</button>
             <button class="x-btn" data-remove-card="${c.id}">&times;</button>
           </div>
@@ -996,6 +1021,8 @@ function viewSettings(){
           <input type="date" id="egc-date-${g.id}" value="${g.loadedDate}">
           <label for="egc-card-${g.id}">Funding source</label>
           <select id="egc-card-${g.id}">${giftCardFundingOptions().map(m=>`<option value="${escapeHtml(m)}"${m===g.cardName?' selected':''}>${escapeHtml(m)}</option>`).join('')}</select>
+          <label for="egc-notes-${g.id}">Notes (optional)</label>
+          <textarea id="egc-notes-${g.id}" rows="2" placeholder="Anything worth remembering">${escapeHtml(g.notes||'')}</textarea>
           <div class="row-flex" style="margin-top:14px;">
             <button class="btn" style="margin-top:0;" data-save-giftcard="${g.id}">Save</button>
             <button class="btn secondary" style="margin-top:0;" data-cancel-giftcard>Cancel</button>
@@ -1006,7 +1033,7 @@ function viewSettings(){
             <div class="n">${escapeHtml(g.name)}</div>
             <div class="m">Loaded ${fmtMoney(g.loadedAmount)} via ${escapeHtml(g.cardName)} on ${fmtDate(g.loadedDate)} \u00b7 ${fmtMoney(giftCardBalance(g))} remaining</div>
           </div>
-          <div>
+          <div class="row-actions">
             <button class="x-btn" data-edit-giftcard="${g.id}" style="color:var(--ink-dim);">&#9998;</button>
             <button class="x-btn" data-remove-giftcard="${g.id}">&times;</button>
           </div>
@@ -1021,6 +1048,8 @@ function viewSettings(){
           <input type="date" id="ng-date" value="${todayStr()}">
           <label for="ng-card">Funding source</label>
           <select id="ng-card">${giftCardFundingOptions().map(m=>`<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join('')}</select>
+          <label for="ng-notes">Notes (optional)</label>
+          <textarea id="ng-notes" rows="2" placeholder="Anything worth remembering"></textarea>
           <button class="btn secondary" id="add-giftcard-btn" style="margin-top:14px;">Load gift card</button>
         ` : `<div class="helptext" style="color:var(--pending);">Add a payment method first — gift cards need a source to charge to.</div>`}
       </div>
@@ -1048,7 +1077,7 @@ function viewSettings(){
               <div class="n">${escapeHtml(m.name)}</div>
               <div class="m">${escapeHtml(m.category)} \u00b7 ${escapeHtml(m.paymentMethod)}</div>
             </div>
-            <div>
+            <div class="row-actions">
               <button class="x-btn" data-edit-merchant="${m.id}" style="color:var(--ink-dim);">&#9998;</button>
               <button class="x-btn" data-remove-merchant="${m.id}">&times;</button>
             </div>
@@ -1077,7 +1106,7 @@ function viewSettings(){
         </div>` : `
         <div class="list-row">
           <div class="n">${escapeHtml(c)}</div>
-          <div>
+          <div class="row-actions">
             <button class="x-btn" data-edit-category="${escapeHtml(c)}" style="color:var(--ink-dim);">&#9998;</button>
             <button class="x-btn" data-remove-category="${escapeHtml(c)}">&times;</button>
           </div>
@@ -1100,7 +1129,7 @@ function viewSettings(){
         </div>` : `
         <div class="list-row">
           <div class="n">${escapeHtml(m)}</div>
-          <div>
+          <div class="row-actions">
             <button class="x-btn" data-edit-method="${escapeHtml(m)}" style="color:var(--ink-dim);">&#9998;</button>
             <button class="x-btn" data-remove-method="${escapeHtml(m)}">&times;</button>
           </div>
@@ -1133,6 +1162,8 @@ function viewSettings(){
           </select>
           <label for="esch-next-${sc.id}">Next due date</label>
           <input type="date" id="esch-next-${sc.id}" value="${sc.nextDue}">
+          <label for="esch-notes-${sc.id}">Notes (optional)</label>
+          <textarea id="esch-notes-${sc.id}" rows="2" placeholder="Anything worth remembering">${escapeHtml(sc.notes||'')}</textarea>
           <div class="row-flex" style="margin-top:14px;">
             <button class="btn" style="margin-top:0;" data-save-schedule="${sc.id}">Save</button>
             <button class="btn secondary" style="margin-top:0;" data-cancel-schedule>Cancel</button>
@@ -1143,7 +1174,7 @@ function viewSettings(){
             <div class="n">${escapeHtml(sc.vendor)} \u00b7 ${fmtMoney(sc.amount)}</div>
             <div class="m">${frequencyLabel(sc.frequency)} \u00b7 ${escapeHtml(sc.paymentMethod)} \u00b7 next ${fmtDate(sc.nextDue)}</div>
           </div>
-          <div>
+          <div class="row-actions">
             <button class="x-btn" data-edit-schedule="${sc.id}" style="color:var(--ink-dim);">&#9998;</button>
             <button class="x-btn" data-remove-schedule="${sc.id}">&times;</button>
           </div>
@@ -1165,6 +1196,8 @@ function viewSettings(){
         </select>
         <label for="ns-next">First due date</label>
         <input type="date" id="ns-next" value="${todayStr()}">
+        <label for="ns-notes">Notes (optional)</label>
+        <textarea id="ns-notes" rows="2" placeholder="Anything worth remembering"></textarea>
         <button class="btn secondary" id="add-schedule-btn" style="margin-top:14px;">Add scheduled payment</button>
       </div>
     </div>
@@ -1320,6 +1353,7 @@ function attachHandlers(){
       const to = document.getElementById('tr-to').value;
       const amount = parseFloat(document.getElementById('tr-amount').value);
       const date = document.getElementById('tr-date').value;
+      const notes = document.getElementById('tr-notes').value.trim();
       if(!from || !to || from === to){ showToast('Pick two different sides to transfer between', true); return; }
       if(isNaN(amount) || amount <= 0){ showToast('Enter a valid amount', true); return; }
       const btn = document.getElementById('do-transfer-btn');
@@ -1328,10 +1362,10 @@ function attachHandlers(){
         await ensureTransferCategory();
         const txns = [];
         if(hasLedger(from)){
-          txns.push({ date, vendor: `Transfer to ${to}`, amount, paymentMethod: from, category: TRANSFER_CATEGORY, notes: '', reconciled:false });
+          txns.push({ date, vendor: `Transfer to ${to}`, amount, paymentMethod: from, category: TRANSFER_CATEGORY, notes, reconciled:false });
         }
         if(hasLedger(to)){
-          txns.push({ date, vendor: `Transfer from ${from}`, amount: -amount, paymentMethod: to, category: TRANSFER_CATEGORY, notes: '', reconciled:false });
+          txns.push({ date, vendor: `Transfer from ${from}`, amount: -amount, paymentMethod: to, category: TRANSFER_CATEGORY, notes, reconciled:false });
         }
         if(txns.length){
           const data = await apiPost('addTransactions', { data: txns });
@@ -1388,6 +1422,7 @@ function attachHandlers(){
     });
     document.querySelectorAll('[data-remove-account]').forEach(btn=>{
       btn.addEventListener('click', async ()=>{
+        if(!confirmDelete('Remove this account? Its balance history stays in the log, but it stops being tracked.')) return;
         try{
           const data = await apiPost('deleteAccount', { id: btn.dataset.removeAccount });
           applyData(data);
@@ -1436,6 +1471,7 @@ function attachHandlers(){
     });
     document.querySelectorAll('[data-remove-card]').forEach(btn=>{
       btn.addEventListener('click', async ()=>{
+        if(!confirmDelete('Remove this card? Its transaction history stays in the log, but reconciliation stops tracking it.')) return;
         try{
           const data = await apiPost('deleteCard', { id: btn.dataset.removeCard });
           applyData(data);
@@ -1457,8 +1493,9 @@ function attachHandlers(){
         if(isNaN(loadedAmount)) return;
         const loadedDate = document.getElementById('ng-date').value;
         const cardName = document.getElementById('ng-card').value;
+        const notes = document.getElementById('ng-notes').value.trim();
         try{
-          const data = await apiPost('addGiftCard', { data: { name, loadedAmount, loadedDate, cardName } });
+          const data = await apiPost('addGiftCard', { data: { name, loadedAmount, loadedDate, cardName, notes } });
           applyData(data);
           showToast('Gift card loaded');
           render();
@@ -1478,9 +1515,10 @@ function attachHandlers(){
         const loadedAmount = parseFloat(document.getElementById(`egc-amount-${id}`).value);
         const loadedDate = document.getElementById(`egc-date-${id}`).value;
         const cardName = document.getElementById(`egc-card-${id}`).value;
+        const notes = document.getElementById(`egc-notes-${id}`).value.trim();
         if(!name || isNaN(loadedAmount)) return;
         try{
-          const data = await apiPost('updateGiftCard', { data: { id, name, loadedAmount, loadedDate, cardName } });
+          const data = await apiPost('updateGiftCard', { data: { id, name, loadedAmount, loadedDate, cardName, notes } });
           applyData(data);
           editingGiftCardId = null;
           showToast('Gift card updated');
@@ -1490,6 +1528,7 @@ function attachHandlers(){
     });
     document.querySelectorAll('[data-remove-giftcard]').forEach(btn=>{
       btn.addEventListener('click', async ()=>{
+        if(!confirmDelete('Remove this gift card? Its loading and redemption history stays in the log, but its balance stops being tracked.')) return;
         try{
           const data = await apiPost('deleteGiftCard', { id: btn.dataset.removeGiftcard });
           applyData(data);
@@ -1514,6 +1553,7 @@ function attachHandlers(){
     });
     document.querySelectorAll('[data-remove-merchant]').forEach(btn=>{
       btn.addEventListener('click', async ()=>{
+        if(!confirmDelete('Remove this merchant?')) return;
         try{
           const data = await apiPost('deleteMerchant', { id: btn.dataset.removeMerchant });
           applyData(data);
@@ -1556,7 +1596,13 @@ function attachHandlers(){
     });
     document.querySelectorAll('[data-remove-category]').forEach(btn=>{
       btn.addEventListener('click', async ()=>{
-        const categories = (state.settings.categories||[]).filter(c=>c!==btn.dataset.removeCategory);
+        const catName = btn.dataset.removeCategory;
+        const isSystemCategory = catName === TRANSFER_CATEGORY || catName === GIFT_CARD_LOAD_CATEGORY;
+        const msg = isSystemCategory
+          ? `"${catName}" is used automatically by Transfers/Gift Cards — removing it from this list won't stop that (it'll just get re-added next time it's needed). Remove anyway?`
+          : `Remove the "${catName}" category?`;
+        if(!confirmDelete(msg)) return;
+        const categories = (state.settings.categories||[]).filter(c=>c!==catName);
         try{
           const data = await apiPost('saveSettings', { data: { categories } });
           applyData(data);
@@ -1598,6 +1644,7 @@ function attachHandlers(){
     });
     document.querySelectorAll('[data-remove-method]').forEach(btn=>{
       btn.addEventListener('click', async ()=>{
+        if(!confirmDelete(`Remove "${btn.dataset.removeMethod}" as a payment method?`)) return;
         const paymentMethods = (state.settings.paymentMethods||[]).filter(m=>m!==btn.dataset.removeMethod);
         try{
           const data = await apiPost('saveSettings', { data: { paymentMethods } });
@@ -1640,7 +1687,7 @@ function attachHandlers(){
         category: document.getElementById('ns-category').value,
         frequency: document.getElementById('ns-freq').value,
         nextDue: document.getElementById('ns-next').value,
-        notes: '',
+        notes: document.getElementById('ns-notes').value.trim(),
         active: true
       };
       const schedules = [...getSchedules(), schedule];
@@ -1670,7 +1717,8 @@ function attachHandlers(){
           paymentMethod: document.getElementById(`esch-method-${id}`).value,
           category: document.getElementById(`esch-category-${id}`).value,
           frequency: document.getElementById(`esch-freq-${id}`).value,
-          nextDue: document.getElementById(`esch-next-${id}`).value
+          nextDue: document.getElementById(`esch-next-${id}`).value,
+          notes: document.getElementById(`esch-notes-${id}`).value.trim()
         });
         try{
           const data = await apiPost('saveSettings', { data: { schedules } });
@@ -1683,6 +1731,7 @@ function attachHandlers(){
     });
     document.querySelectorAll('[data-remove-schedule]').forEach(btn=>{
       btn.addEventListener('click', async ()=>{
+        if(!confirmDelete('Remove this scheduled payment? It will stop logging automatically.')) return;
         const schedules = getSchedules().filter(sc=>sc.id!==btn.dataset.removeSchedule);
         try{
           const data = await apiPost('saveSettings', { data: { schedules } });
@@ -1702,6 +1751,9 @@ function attachHandlers(){
 }
 
 function attachEditHandlers(id){
+  document.getElementById('cancel-edit-btn').addEventListener('click', ()=>{
+    setView('log');
+  });
   document.querySelectorAll('#ef-method-group .pill').forEach(p=>{
     p.addEventListener('click', ()=>{
       document.querySelectorAll('#ef-method-group .pill').forEach(x=>x.classList.remove('active'));
@@ -1736,6 +1788,7 @@ function attachEditHandlers(id){
     }catch(err){ setSync('bad'); showToast('Could not save', true); }
   });
   document.getElementById('delete-txn-btn').addEventListener('click', async ()=>{
+    if(!confirmDelete('Delete this transaction? This can\'t be undone.')) return;
     try{
       const data = await apiPost('deleteTransaction', { id });
       applyData(data);
