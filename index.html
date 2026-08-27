@@ -99,12 +99,19 @@
   input.mono,input[type=number],input[type=date]{font-family:'IBM Plex Mono',monospace;}
   input:focus,select:focus,textarea:focus{outline:2px solid var(--accent);outline-offset:0;border-color:transparent;}
   .pill-group{display:flex;gap:8px;flex-wrap:wrap;margin-top:2px;}
-  .settings-nav{
-    display:flex;gap:8px;overflow-x:auto;-webkit-overflow-scrolling:touch;
-    padding:2px 2px 12px;margin-bottom:2px;scrollbar-width:none;
+  .menu-row{
+    display:flex;align-items:center;gap:14px;padding:14px 4px;
+    border-bottom:1px solid var(--line);cursor:pointer;
   }
-  .settings-nav::-webkit-scrollbar{display:none;}
-  .settings-nav .pill{white-space:nowrap;flex:0 0 auto;}
+  .menu-row:last-child{border-bottom:none;}
+  .menu-icon{
+    width:40px;height:40px;border-radius:10px;background:var(--surface-2);
+    display:flex;align-items:center;justify-content:center;font-size:19px;flex:0 0 auto;
+  }
+  .menu-text{flex:1;min-width:0;}
+  .menu-text .title{font-size:15px;font-weight:600;}
+  .menu-text .subtitle{font-size:12px;color:var(--ink-dim);margin-top:2px;}
+  .menu-chevron{color:var(--ink-dim);font-size:22px;flex:0 0 auto;line-height:1;}
   .pill{
     padding:8px 13px;border-radius:20px;border:1px solid var(--line);background:var(--surface-2);
     font-size:13px;cursor:pointer;color:var(--ink-dim);
@@ -264,6 +271,7 @@ let editingScheduleId = null;
 let logFilterMethod = '';
 let logFilterCategory = '';
 let logFilterSearch = '';
+let settingsSubView = null;
 
 function uid(){ return Date.now().toString(36) + Math.random().toString(36).slice(2,7); }
 
@@ -564,6 +572,7 @@ async function upsertMerchantFromEntry(name, category, paymentMethod){
 /* ============ View router ============ */
 function setView(v){
   currentView = v;
+  if(v !== 'settings') settingsSubView = null;
   document.querySelectorAll('.nav-btn').forEach(b=>b.classList.toggle('active', b.dataset.view===v));
   render();
 }
@@ -607,17 +616,15 @@ function renderHeader(){
   const unreconciled = state.transactions.filter(t => isCardMethod(t.paymentMethod) && !t.reconciled).length;
 
   let statsHtml = '';
-  if(cardStats.length){
-    // Lead with whichever card closes soonest.
-    const soonest = [...cardStats].sort((a,b)=>a.daysLeft-b.daysLeft)[0];
-    statsHtml += `<div class="stat-chip"><b>${fmtMoney(soonest.spend)}</b> ${escapeHtml(soonest.card.name)} statement</div>`;
-    statsHtml += `<div class="stat-chip${soonest.daysLeft<=3?' warn':''}"><b>${soonest.daysLeft}d</b> to close (${fmtDate(soonest.key)})</div>`;
-    if(cardStats.length>1) statsHtml += `<div class="stat-chip">${cardStats.length} cards</div>`;
-    if(soonest.card.creditLimit){
-      const over = soonest.spend > soonest.card.creditLimit;
-      statsHtml += `<div class="stat-chip${over?' bad':''}"><b>${fmtMoney(soonest.card.creditLimit - soonest.spend)}</b> ${escapeHtml(soonest.card.name)} headroom</div>`;
+  // Show every card, not just whichever closes soonest — sorted so the
+  // most urgent one still reads first.
+  [...cardStats].sort((a,b)=>a.daysLeft-b.daysLeft).forEach(cs=>{
+    statsHtml += `<div class="stat-chip${cs.daysLeft<=3?' warn':''}"><b>${fmtMoney(cs.spend)}</b> ${escapeHtml(cs.card.name)} \u00b7 ${cs.daysLeft}d to close</div>`;
+    if(cs.card.creditLimit){
+      const over = cs.spend > cs.card.creditLimit;
+      statsHtml += `<div class="stat-chip${over?' bad':''}"><b>${fmtMoney(cs.card.creditLimit - cs.spend)}</b> ${escapeHtml(cs.card.name)} headroom</div>`;
     }
-  }
+  });
   if(unreconciled>0) statsHtml += `<div class="stat-chip warn"><b>${unreconciled}</b> unreconciled</div>`;
   const apOutstanding = totalAfterpayOutstanding();
   if(apOutstanding>0.001) statsHtml += `<div class="stat-chip"><b>${fmtMoney(apOutstanding)}</b> Afterpay owing</div>`;
@@ -782,11 +789,18 @@ function viewLog(){
   const allSorted = [...state.transactions].sort((a,b)=> b.date.localeCompare(a.date) || String(b.id).localeCompare(String(a.id)));
   const methodOptions = allPaymentMethodOptions();
   const categoryOptions = state.settings.categories||[];
-  const search = logFilterSearch.trim().toLowerCase();
+  // Known vendors: anything saved in Merchants plus any vendor name that's
+  // actually appeared in a transaction, so the dropdown always covers
+  // everything filterable even if a vendor was never saved as a merchant.
+  const vendorOptions = [...new Set([
+    ...state.merchants.map(m=>m.name),
+    ...state.transactions.map(t=>t.vendor)
+  ])].sort((a,b)=>a.localeCompare(b));
+  const search = logFilterSearch;
   const sorted = allSorted.filter(t =>
     (!logFilterMethod || t.paymentMethod === logFilterMethod) &&
     (!logFilterCategory || t.category === logFilterCategory) &&
-    (!search || t.vendor.toLowerCase().includes(search))
+    (!search || t.vendor === search)
   );
   const filtersActive = !!(logFilterMethod || logFilterCategory || search);
 
@@ -794,7 +808,10 @@ function viewLog(){
     <div class="card">
       <div class="card-title">Filter</div>
       <label for="log-search">Vendor</label>
-      <input type="text" id="log-search" placeholder="Search by vendor" value="${escapeHtml(logFilterSearch)}">
+      <select id="log-search">
+        <option value=""${!logFilterSearch?' selected':''}>All vendors</option>
+        ${vendorOptions.map(v=>`<option value="${escapeHtml(v)}"${v===logFilterSearch?' selected':''}>${escapeHtml(v)}</option>`).join('')}
+      </select>
       <label for="log-filter-method">Payment method</label>
       <select id="log-filter-method">
         <option value=""${!logFilterMethod?' selected':''}>All methods</option>
@@ -965,20 +982,50 @@ function updateVarianceDisplay(cardId, key){
 
 /* ============ Settings ============ */
 function viewSettings(){
-  const s = state.settings;
+  return settingsSubView ? viewSettingsSection(settingsSubView) : viewSettingsMenu();
+}
+
+const SETTINGS_MENU = [
+  { key:'accounts', icon:'\ud83c\udfe6', title:'Bank accounts', subtitle: () => `${getAccounts().length} account${getAccounts().length===1?'':'s'} \u00b7 balances & running totals`, render: settingsSectionAccounts },
+  { key:'transfer', icon:'\ud83d\udd01', title:'Transfer money', subtitle: () => 'Move money between methods without it counting as spend', render: settingsSectionTransfer },
+  { key:'cards', icon:'\ud83d\udcb3', title:'Credit cards', subtitle: () => `${getCards().length} card${getCards().length===1?'':'s'} \u00b7 closing dates & limits`, render: settingsSectionCards },
+  { key:'giftcards', icon:'\ud83c\udf81', title:'Gift cards', subtitle: () => `${getGiftCards().length} gift card${getGiftCards().length===1?'':'s'} tracked`, render: settingsSectionGiftCards },
+  { key:'merchants', icon:'\ud83c\udfec', title:'Merchants', subtitle: () => `${state.merchants.length} saved vendor${state.merchants.length===1?'':'s'}`, render: settingsSectionMerchants },
+  { key:'categories', icon:'\ud83c\udff7\ufe0f', title:'Categories', subtitle: () => `${(state.settings.categories||[]).length} categories`, render: settingsSectionCategories },
+  { key:'methods', icon:'\ud83d\udcb5', title:'Payment methods', subtitle: () => `${(state.settings.paymentMethods||[]).length} non-card methods`, render: settingsSectionMethods },
+  { key:'schedules', icon:'\u23f0', title:'Scheduled payments', subtitle: () => `${getSchedules().length} recurring payment${getSchedules().length===1?'':'s'}`, render: settingsSectionSchedules },
+  { key:'datasource', icon:'\u2601\ufe0f', title:'Data source', subtitle: () => 'Google Sheet connection', render: settingsSectionDataSource }
+];
+
+function viewSettingsMenu(){
   return `
-    <div class="settings-nav">
-      <button class="pill" data-jump="set-accounts">Accounts</button>
-      <button class="pill" data-jump="set-transfer">Transfer</button>
-      <button class="pill" data-jump="set-cards">Cards</button>
-      <button class="pill" data-jump="set-giftcards">Gift cards</button>
-      <button class="pill" data-jump="set-merchants">Merchants</button>
-      <button class="pill" data-jump="set-categories">Categories</button>
-      <button class="pill" data-jump="set-methods">Methods</button>
-      <button class="pill" data-jump="set-schedules">Schedules</button>
-      <button class="pill" data-jump="set-datasource">Data</button>
+    <div class="card" style="padding:6px 14px;">
+      ${SETTINGS_MENU.map(item => `
+        <div class="menu-row" data-settings-nav="${item.key}">
+          <div class="menu-icon">${item.icon}</div>
+          <div class="menu-text">
+            <div class="title">${escapeHtml(item.title)}</div>
+            <div class="subtitle">${escapeHtml(item.subtitle())}</div>
+          </div>
+          <div class="menu-chevron">&#8250;</div>
+        </div>
+      `).join('')}
     </div>
-    <div class="card" id="set-accounts">
+  `;
+}
+
+function viewSettingsSection(key){
+  const item = SETTINGS_MENU.find(i=>i.key===key);
+  if(!item) return viewSettingsMenu();
+  return `
+    <button class="btn secondary" id="settings-back-btn" style="margin-bottom:14px;">&larr; Back to Settings</button>
+    ${item.render()}
+  `;
+}
+
+function settingsSectionAccounts(){
+  return `
+    <div class="card">
       <div class="card-title">Bank accounts</div>
       <div class="helptext" style="margin-bottom:10px;">Each account gets its own opening balance and running total. An account's name doubles as its payment method — pick it in Add/Edit for a bank transfer, EFTPOS, etc. against that account.</div>
       ${getAccounts().length ? getAccounts().map(a=> a.id===editingAccountId ? `
@@ -1014,8 +1061,12 @@ function viewSettings(){
         <button class="btn secondary" id="add-account-btn" style="margin-top:14px;">Add account</button>
       </div>
     </div>
+  `;
+}
 
-    <div class="card" id="set-transfer">
+function settingsSectionTransfer(){
+  return `
+    <div class="card">
       <div class="card-title">Transfer money</div>
       <div class="helptext" style="margin-bottom:10px;">Move money between accounts and cash without it counting as spend — filed under "${TRANSFER_CATEGORY}". Only sides that actually track a balance get a record; Cash, Debit Card, and Bank Transfer have no ledger of their own.</div>
       <label for="tr-from">From</label>
@@ -1030,8 +1081,12 @@ function viewSettings(){
       <textarea id="tr-notes" rows="2" placeholder="What this transfer was for"></textarea>
       <button class="btn secondary" id="do-transfer-btn" style="margin-top:14px;">Transfer</button>
     </div>
+  `;
+}
 
-    <div class="card" id="set-cards">
+function settingsSectionCards(){
+  return `
+    <div class="card">
       <div class="card-title">Credit cards</div>
       <div class="helptext" style="margin-bottom:10px;">Each card gets its own closing date, credit limit, and reconciliation periods. A card's name doubles as its payment method — pick it in Add/Edit just like Cash or Afterpay.</div>
       ${getCards().length ? getCards().map(c=> c.id===editingCardId ? `
@@ -1067,8 +1122,12 @@ function viewSettings(){
         <button class="btn secondary" id="add-card-btn" style="margin-top:14px;">Add card</button>
       </div>
     </div>
+  `;
+}
 
-    <div class="card" id="set-giftcards">
+function settingsSectionGiftCards(){
+  return `
+    <div class="card">
       <div class="card-title">Gift cards</div>
       <div class="helptext" style="margin-bottom:10px;">Loading a gift card charges the source you pick but doesn't count as spend yet — it's filed under "${GIFT_CARD_LOAD_CATEGORY}". When you actually redeem it, pick the gift card as the payment method on a normal transaction with the real category — that's when it counts as an expense.</div>
       ${getGiftCards().length ? getGiftCards().map(g=> g.id===editingGiftCardId ? `
@@ -1114,8 +1173,13 @@ function viewSettings(){
         ` : `<div class="helptext" style="color:var(--pending);">Add a payment method first — gift cards need a source to charge to.</div>`}
       </div>
     </div>
+  `;
+}
 
-    <div class="card" id="set-merchants">
+function settingsSectionMerchants(){
+  const s = state.settings;
+  return `
+    <div class="card">
       <div class="card-title">Merchants</div>
       <div class="helptext" style="margin-bottom:10px;">New vendors are added automatically when you log a transaction. Manage or pre-configure them here.</div>
       <div id="merchant-list-ui">
@@ -1153,8 +1217,13 @@ function viewSettings(){
         <button class="btn secondary" id="add-merchant-btn" style="margin-top:14px;">Add merchant</button>
       </div>
     </div>
+  `;
+}
 
-    <div class="card" id="set-categories">
+function settingsSectionCategories(){
+  const s = state.settings;
+  return `
+    <div class="card">
       <div class="card-title">Categories</div>
       ${(s.categories||[]).map(c=> c===editingCategory ? `
         <div class="list-row" style="display:block;padding-bottom:14px;">
@@ -1176,8 +1245,13 @@ function viewSettings(){
         <button id="add-category-btn">Add</button>
       </div>
     </div>
+  `;
+}
 
-    <div class="card" id="set-methods">
+function settingsSectionMethods(){
+  const s = state.settings;
+  return `
+    <div class="card">
       <div class="card-title">Payment methods</div>
       ${(s.paymentMethods||[]).map(m=> m===editingMethod ? `
         <div class="list-row" style="display:block;padding-bottom:14px;">
@@ -1200,8 +1274,13 @@ function viewSettings(){
       </div>
       <div class="helptext" style="margin-top:10px;">Cards are managed separately above — this list is for non-card methods like Cash, Afterpay, or Bank Transfer.</div>
     </div>
+  `;
+}
 
-    <div class="card" id="set-schedules">
+function settingsSectionSchedules(){
+  const s = state.settings;
+  return `
+    <div class="card">
       <div class="card-title">Scheduled payments</div>
       <div class="helptext" style="margin-bottom:10px;">Regular payments — rent, subscriptions, loan repayments — log themselves automatically on their due date, catching up on anything missed since you last opened the app. For true background automation even when the app's closed, open <code>Code.gs</code> in the Apps Script editor, select <code>createDailyScheduleTrigger</code> in the function dropdown, and click Run once (one-time authorization).</div>
       ${getSchedules().length ? getSchedules().map(sc=> sc.id===editingScheduleId ? `
@@ -1261,8 +1340,12 @@ function viewSettings(){
         <button class="btn secondary" id="add-schedule-btn" style="margin-top:14px;">Add scheduled payment</button>
       </div>
     </div>
+  `;
+}
 
-    <div class="card" id="set-datasource">
+function settingsSectionDataSource(){
+  return `
+    <div class="card">
       <div class="card-title">Data source</div>
       <label for="s-api-url">Google Sheet connection (Apps Script URL)</label>
       <input type="url" id="s-api-url" placeholder="https://script.google.com/macros/s/…/exec" value="${API_URL}">
@@ -1376,11 +1459,9 @@ function attachHandlers(){
     });
     const searchInput = document.getElementById('log-search');
     if(searchInput){
-      searchInput.addEventListener('input', ()=>{
+      searchInput.addEventListener('change', ()=>{
         logFilterSearch = searchInput.value;
         render();
-        const el = document.getElementById('log-search');
-        if(el){ el.focus(); const v = el.value; el.setSelectionRange(v.length, v.length); }
       });
     }
     const methodFilter = document.getElementById('log-filter-method');
@@ -1445,13 +1526,17 @@ function attachHandlers(){
   }
 
   if(currentView === 'settings'){
-    document.querySelectorAll('[data-jump]').forEach(btn=>{
-      btn.addEventListener('click', ()=>{
-        const target = document.getElementById(btn.dataset.jump);
-        if(target) target.scrollIntoView({behavior:'smooth', block:'start'});
+    document.querySelectorAll('[data-settings-nav]').forEach(row=>{
+      row.addEventListener('click', ()=>{
+        settingsSubView = row.dataset.settingsNav;
+        render();
       });
     });
-    document.getElementById('do-transfer-btn').addEventListener('click', async ()=>{
+    document.getElementById('settings-back-btn')?.addEventListener('click', ()=>{
+      settingsSubView = null;
+      render();
+    });
+    document.getElementById('do-transfer-btn')?.addEventListener('click', async ()=>{
       const from = document.getElementById('tr-from').value;
       const to = document.getElementById('tr-to').value;
       const amount = parseFloat(document.getElementById('tr-amount').value);
@@ -1486,7 +1571,7 @@ function attachHandlers(){
       }
     });
 
-    document.getElementById('add-account-btn').addEventListener('click', async ()=>{
+    document.getElementById('add-account-btn')?.addEventListener('click', async ()=>{
       const name = document.getElementById('na-name').value.trim();
       if(!name) return;
       if(getAccounts().some(a=>a.name===name) || getCards().some(c=>c.name===name) || (state.settings.paymentMethods||[]).includes(name)){
@@ -1535,7 +1620,7 @@ function attachHandlers(){
       });
     });
 
-    document.getElementById('add-card-btn').addEventListener('click', async ()=>{
+    document.getElementById('add-card-btn')?.addEventListener('click', async ()=>{
       const name = document.getElementById('nc-name').value.trim();
       if(!name) return;
       if(getCards().some(c=>c.name===name) || getAccounts().some(a=>a.name===name) || (state.settings.paymentMethods||[]).includes(name)){
@@ -1641,7 +1726,7 @@ function attachHandlers(){
       });
     });
 
-    document.getElementById('add-merchant-btn').addEventListener('click', async ()=>{
+    document.getElementById('add-merchant-btn')?.addEventListener('click', async ()=>{
       const name = document.getElementById('nm-name').value.trim();
       if(!name) return;
       if(findMerchant(name)){ showToast('That merchant already exists'); return; }
@@ -1687,7 +1772,7 @@ function attachHandlers(){
       });
     });
 
-    document.getElementById('add-category-btn').addEventListener('click', async ()=>{
+    document.getElementById('add-category-btn')?.addEventListener('click', async ()=>{
       const v = document.getElementById('new-category-input').value.trim();
       if(!v || (state.settings.categories||[]).includes(v)) return;
       const categories = [...(state.settings.categories||[]), v];
@@ -1735,7 +1820,7 @@ function attachHandlers(){
       });
     });
 
-    document.getElementById('add-method-btn').addEventListener('click', async ()=>{
+    document.getElementById('add-method-btn')?.addEventListener('click', async ()=>{
       const v = document.getElementById('new-method-input').value.trim();
       if(!v || (state.settings.paymentMethods||[]).includes(v)) return;
       const paymentMethods = [...(state.settings.paymentMethods||[]), v];
@@ -1778,7 +1863,7 @@ function attachHandlers(){
       });
     });
 
-    document.getElementById('add-schedule-btn').addEventListener('click', async ()=>{
+    document.getElementById('add-schedule-btn')?.addEventListener('click', async ()=>{
       const vendor = document.getElementById('ns-vendor').value.trim();
       const amount = parseFloat(document.getElementById('ns-amount').value);
       if(!vendor || isNaN(amount)) return;
@@ -1845,7 +1930,7 @@ function attachHandlers(){
       });
     });
 
-    document.getElementById('save-api-url-btn').addEventListener('click', ()=>{
+    document.getElementById('save-api-url-btn')?.addEventListener('click', ()=>{
       const url = document.getElementById('s-api-url').value.trim();
       setApiUrl(url);
       location.reload();
