@@ -99,6 +99,12 @@
   input.mono,input[type=number],input[type=date]{font-family:'IBM Plex Mono',monospace;}
   input:focus,select:focus,textarea:focus{outline:2px solid var(--accent);outline-offset:0;border-color:transparent;}
   .pill-group{display:flex;gap:8px;flex-wrap:wrap;margin-top:2px;}
+  .settings-nav{
+    display:flex;gap:8px;overflow-x:auto;-webkit-overflow-scrolling:touch;
+    padding:2px 2px 12px;margin-bottom:2px;scrollbar-width:none;
+  }
+  .settings-nav::-webkit-scrollbar{display:none;}
+  .settings-nav .pill{white-space:nowrap;flex:0 0 auto;}
   .pill{
     padding:8px 13px;border-radius:20px;border:1px solid var(--line);background:var(--surface-2);
     font-size:13px;cursor:pointer;color:var(--ink-dim);
@@ -255,6 +261,9 @@ let editingCardId = null;
 let editingAccountId = null;
 let editingGiftCardId = null;
 let editingScheduleId = null;
+let logFilterMethod = '';
+let logFilterCategory = '';
+let logFilterSearch = '';
 
 function uid(){ return Date.now().toString(36) + Math.random().toString(36).slice(2,7); }
 
@@ -303,11 +312,17 @@ function giftCardTag(t){
 function giftCardFundingOptions(){
   return allPaymentMethodOptions().filter(m => m !== 'Afterpay');
 }
-// Categories used automatically by Transfers/Gift Cards are left out of
-// the manual picker — they still exist in Settings and still work, just
-// aren't offered as something to hand-pick for an ordinary purchase.
+// Categories used automatically by Transfers/Gift Cards/Afterpay are left
+// out of the manual picker — they still exist in Settings and still work,
+// just aren't offered as something to hand-pick for an ordinary purchase.
 function manualCategoryOptions(){
-  return (state.settings.categories||[]).filter(c => c !== TRANSFER_CATEGORY && c !== GIFT_CARD_LOAD_CATEGORY);
+  return (state.settings.categories||[]).filter(c => !SYSTEM_CATEGORIES.includes(c));
+}
+async function ensureCategoryExists(catName){
+  if((state.settings.categories||[]).includes(catName)) return;
+  const categories = [...(state.settings.categories||[]), catName];
+  const data = await apiPost('saveSettings', { data: { categories } });
+  applyData(data);
 }
 
 /* ============ Transfers ============ */
@@ -323,12 +338,12 @@ function transferMethodOptions(){
 function hasLedger(name){
   return !!(findAccount(name) || findCard(name) || isGiftCardMethod(name));
 }
-async function ensureTransferCategory(){
-  if((state.settings.categories||[]).includes(TRANSFER_CATEGORY)) return;
-  const categories = [...(state.settings.categories||[]), TRANSFER_CATEGORY];
-  const data = await apiPost('saveSettings', { data: { categories } });
-  applyData(data);
-}
+
+// Categories that exist purely for internal bookkeeping — never real spend,
+// always excluded from the "Spend by category"/"Spend by payment method"
+// widgets, and protected (with a warning) from accidental deletion.
+const AFTERPAY_INSTALLMENT_CATEGORY = 'Afterpay Installment';
+const SYSTEM_CATEGORIES = [TRANSFER_CATEGORY, GIFT_CARD_LOAD_CATEGORY, AFTERPAY_INSTALLMENT_CATEGORY];
 
 /* ============ Scheduled payments ============ */
 function getSchedules(){ return state.settings.schedules || []; }
@@ -351,9 +366,11 @@ function afterpayInstallments(total, startDate){
   });
 }
 
-function afterpayTag(notes){
-  const m = /Afterpay installment (\d+) of (\d+)/.exec(notes||'');
-  return m ? `<span class="tag" style="color:var(--pending);">Afterpay ${m[1]}/${m[2]}</span>` : '';
+function afterpayTag(t){
+  const installmentMatch = /Afterpay installment (\d+) of (\d+)/.exec(t.notes||'');
+  if(installmentMatch) return `<span class="tag" style="color:var(--pending);">Afterpay ${installmentMatch[1]}/${installmentMatch[2]}</span>`;
+  if(t.paymentMethod === 'Afterpay' && t.category !== AFTERPAY_INSTALLMENT_CATEGORY) return `<span class="tag" style="color:var(--pending);">Afterpay purchase</span>`;
+  return '';
 }
 
 // Groups the 4 installment transactions of one Afterpay purchase back
@@ -611,11 +628,14 @@ function renderHeader(){
 function viewDashboard(){
   const now = todayStr();
   const cards = getCards();
-  // Internal transfers move money between your own accounts/cards — not a
-  // real expense — so they're kept out of both spend widgets below. They
+  // Internal transfers, gift card loading, and Afterpay card installments
+  // all move money without being a real expense in their own right — the
+  // real spend already gets recognized elsewhere (gift card redemption
+  // hits its real category; the Afterpay purchase is booked in full up
+  // front). So all three are kept out of both spend widgets below. They
   // still count normally toward account balances, card statements, and
   // reconciliation, which is computed separately from this.
-  const monthTxns = state.transactions.filter(t => t.date.slice(0,7) === now.slice(0,7) && t.category !== TRANSFER_CATEGORY);
+  const monthTxns = state.transactions.filter(t => t.date.slice(0,7) === now.slice(0,7) && !SYSTEM_CATEGORIES.includes(t.category));
   const methodList = allPaymentMethodOptions();
   const byMethod = {};
   methodList.forEach(m => byMethod[m] = 0);
@@ -759,10 +779,39 @@ function viewAdd(){
 
 /* ============ Log ============ */
 function viewLog(){
-  const sorted = [...state.transactions].sort((a,b)=> b.date.localeCompare(a.date) || String(b.id).localeCompare(String(a.id)));
-  if(!sorted.length) return `<div class="card"><div class="empty">No transactions yet. Tap Add to log your first one.</div></div>`;
+  const allSorted = [...state.transactions].sort((a,b)=> b.date.localeCompare(a.date) || String(b.id).localeCompare(String(a.id)));
+  const methodOptions = allPaymentMethodOptions();
+  const categoryOptions = state.settings.categories||[];
+  const search = logFilterSearch.trim().toLowerCase();
+  const sorted = allSorted.filter(t =>
+    (!logFilterMethod || t.paymentMethod === logFilterMethod) &&
+    (!logFilterCategory || t.category === logFilterCategory) &&
+    (!search || t.vendor.toLowerCase().includes(search))
+  );
+  const filtersActive = !!(logFilterMethod || logFilterCategory || search);
 
-  let html = '<div class="card">';
+  const filterBar = `
+    <div class="card">
+      <div class="card-title">Filter</div>
+      <label for="log-search">Vendor</label>
+      <input type="text" id="log-search" placeholder="Search by vendor" value="${escapeHtml(logFilterSearch)}">
+      <label for="log-filter-method">Payment method</label>
+      <select id="log-filter-method">
+        <option value=""${!logFilterMethod?' selected':''}>All methods</option>
+        ${methodOptions.map(m=>`<option value="${escapeHtml(m)}"${m===logFilterMethod?' selected':''}>${escapeHtml(m)}</option>`).join('')}
+      </select>
+      <label for="log-filter-category">Category</label>
+      <select id="log-filter-category">
+        <option value=""${!logFilterCategory?' selected':''}>All categories</option>
+        ${categoryOptions.map(c=>`<option value="${escapeHtml(c)}"${c===logFilterCategory?' selected':''}>${escapeHtml(c)}</option>`).join('')}
+      </select>
+      ${filtersActive ? `<button class="btn secondary" id="clear-log-filters-btn" style="margin-top:14px;">Clear filters</button>` : ''}
+    </div>`;
+
+  if(!allSorted.length) return `<div class="card"><div class="empty">No transactions yet. Tap Add to log your first one.</div></div>`;
+  if(!sorted.length) return filterBar + `<div class="card"><div class="empty">No transactions match this filter.</div></div>`;
+
+  let html = filterBar + '<div class="card">';
   let lastDate = null;
   sorted.forEach(t=>{
     if(t.date !== lastDate){
@@ -773,7 +822,7 @@ function viewLog(){
       <div class="txn-item" data-id="${t.id}">
         <div class="txn-left">
           <div class="vendor">${escapeHtml(t.vendor)}</div>
-          <div class="meta"><span class="tag">${escapeHtml(t.paymentMethod)}</span><span class="tag">${escapeHtml(t.category)}</span>${afterpayTag(t.notes)}${scheduledTag(t.notes)}${giftCardTag(t)}</div>
+          <div class="meta"><span class="tag">${escapeHtml(t.paymentMethod)}</span><span class="tag">${escapeHtml(t.category)}</span>${afterpayTag(t)}${scheduledTag(t.notes)}${giftCardTag(t)}</div>
         </div>
         <div class="txn-right">
           <div class="amt">${fmtMoney(t.amount)}</div>
@@ -793,7 +842,7 @@ function viewEditTxn(id){
   // If this transaction already carries a system category (from a transfer
   // or gift card load), keep it selectable here even though it's hidden
   // from the picker for new transactions.
-  if(!cats.includes(t.category) && (t.category===TRANSFER_CATEGORY || t.category===GIFT_CARD_LOAD_CATEGORY)){
+  if(!cats.includes(t.category) && SYSTEM_CATEGORIES.includes(t.category)){
     cats.unshift(t.category);
   }
   const methods = allPaymentMethodOptions();
@@ -918,7 +967,18 @@ function updateVarianceDisplay(cardId, key){
 function viewSettings(){
   const s = state.settings;
   return `
-    <div class="card">
+    <div class="settings-nav">
+      <button class="pill" data-jump="set-accounts">Accounts</button>
+      <button class="pill" data-jump="set-transfer">Transfer</button>
+      <button class="pill" data-jump="set-cards">Cards</button>
+      <button class="pill" data-jump="set-giftcards">Gift cards</button>
+      <button class="pill" data-jump="set-merchants">Merchants</button>
+      <button class="pill" data-jump="set-categories">Categories</button>
+      <button class="pill" data-jump="set-methods">Methods</button>
+      <button class="pill" data-jump="set-schedules">Schedules</button>
+      <button class="pill" data-jump="set-datasource">Data</button>
+    </div>
+    <div class="card" id="set-accounts">
       <div class="card-title">Bank accounts</div>
       <div class="helptext" style="margin-bottom:10px;">Each account gets its own opening balance and running total. An account's name doubles as its payment method — pick it in Add/Edit for a bank transfer, EFTPOS, etc. against that account.</div>
       ${getAccounts().length ? getAccounts().map(a=> a.id===editingAccountId ? `
@@ -955,7 +1015,7 @@ function viewSettings(){
       </div>
     </div>
 
-    <div class="card">
+    <div class="card" id="set-transfer">
       <div class="card-title">Transfer money</div>
       <div class="helptext" style="margin-bottom:10px;">Move money between accounts and cash without it counting as spend — filed under "${TRANSFER_CATEGORY}". Only sides that actually track a balance get a record; Cash, Debit Card, and Bank Transfer have no ledger of their own.</div>
       <label for="tr-from">From</label>
@@ -971,7 +1031,7 @@ function viewSettings(){
       <button class="btn secondary" id="do-transfer-btn" style="margin-top:14px;">Transfer</button>
     </div>
 
-    <div class="card">
+    <div class="card" id="set-cards">
       <div class="card-title">Credit cards</div>
       <div class="helptext" style="margin-bottom:10px;">Each card gets its own closing date, credit limit, and reconciliation periods. A card's name doubles as its payment method — pick it in Add/Edit just like Cash or Afterpay.</div>
       ${getCards().length ? getCards().map(c=> c.id===editingCardId ? `
@@ -1008,7 +1068,7 @@ function viewSettings(){
       </div>
     </div>
 
-    <div class="card">
+    <div class="card" id="set-giftcards">
       <div class="card-title">Gift cards</div>
       <div class="helptext" style="margin-bottom:10px;">Loading a gift card charges the source you pick but doesn't count as spend yet — it's filed under "${GIFT_CARD_LOAD_CATEGORY}". When you actually redeem it, pick the gift card as the payment method on a normal transaction with the real category — that's when it counts as an expense.</div>
       ${getGiftCards().length ? getGiftCards().map(g=> g.id===editingGiftCardId ? `
@@ -1055,7 +1115,7 @@ function viewSettings(){
       </div>
     </div>
 
-    <div class="card">
+    <div class="card" id="set-merchants">
       <div class="card-title">Merchants</div>
       <div class="helptext" style="margin-bottom:10px;">New vendors are added automatically when you log a transaction. Manage or pre-configure them here.</div>
       <div id="merchant-list-ui">
@@ -1094,7 +1154,7 @@ function viewSettings(){
       </div>
     </div>
 
-    <div class="card">
+    <div class="card" id="set-categories">
       <div class="card-title">Categories</div>
       ${(s.categories||[]).map(c=> c===editingCategory ? `
         <div class="list-row" style="display:block;padding-bottom:14px;">
@@ -1117,7 +1177,7 @@ function viewSettings(){
       </div>
     </div>
 
-    <div class="card">
+    <div class="card" id="set-methods">
       <div class="card-title">Payment methods</div>
       ${(s.paymentMethods||[]).map(m=> m===editingMethod ? `
         <div class="list-row" style="display:block;padding-bottom:14px;">
@@ -1141,7 +1201,7 @@ function viewSettings(){
       <div class="helptext" style="margin-top:10px;">Cards are managed separately above — this list is for non-card methods like Cash, Afterpay, or Bank Transfer.</div>
     </div>
 
-    <div class="card">
+    <div class="card" id="set-schedules">
       <div class="card-title">Scheduled payments</div>
       <div class="helptext" style="margin-bottom:10px;">Regular payments — rent, subscriptions, loan repayments — log themselves automatically on their due date, catching up on anything missed since you last opened the app. For true background automation even when the app's closed, open <code>Code.gs</code> in the Apps Script editor, select <code>createDailyScheduleTrigger</code> in the function dropdown, and click Run once (one-time authorization).</div>
       ${getSchedules().length ? getSchedules().map(sc=> sc.id===editingScheduleId ? `
@@ -1202,7 +1262,7 @@ function viewSettings(){
       </div>
     </div>
 
-    <div class="card">
+    <div class="card" id="set-datasource">
       <div class="card-title">Data source</div>
       <label for="s-api-url">Google Sheet connection (Apps Script URL)</label>
       <input type="url" id="s-api-url" placeholder="https://script.google.com/macros/s/…/exec" value="${API_URL}">
@@ -1264,20 +1324,33 @@ function attachHandlers(){
             btn.disabled = false; btn.textContent = 'Save transaction';
             return;
           }
+          await ensureCategoryExists(AFTERPAY_INSTALLMENT_CATEGORY);
           const groupId = uid();
+          // The full amount is booked immediately, against the real
+          // category, as its own "Afterpay" transaction — that's when the
+          // expense actually happened. The 4 card installments are kept in
+          // a system category so they don't get counted as spend a second
+          // time; they still hit the card's real statement, and "Afterpay —
+          // still owing" on the dashboard tracks them shrinking as each one
+          // posts.
+          const upfront = {
+            date, vendor, amount, paymentMethod: 'Afterpay', category,
+            notes: (notes ? notes + ' \u00b7 ' : '') + `Afterpay purchase \u2014 4 installments of ${fmtMoney(amount/4)} charging to ${cardName}`,
+            reconciled: false
+          };
           const installments = afterpayInstallments(amount, date).map((inst,i)=>({
             date: inst.date,
             vendor,
             amount: inst.amount,
             paymentMethod: cardName,
-            category,
-            notes: (notes ? notes + ' \u00b7 ' : '') + `Afterpay installment ${i+1} of 4 (purchased ${date}, total ${fmtMoney(amount)}) [apg:${groupId}]`,
+            category: AFTERPAY_INSTALLMENT_CATEGORY,
+            notes: `Afterpay installment ${i+1} of 4 (purchased ${date}, total ${fmtMoney(amount)}) [apg:${groupId}]`,
             reconciled: false
           }));
-          const data = await apiPost('addTransactions', { data: installments });
+          const data = await apiPost('addTransactions', { data: [upfront, ...installments] });
           applyData(data);
           await upsertMerchantFromEntry(vendor, category, 'Afterpay');
-          showToast('Split into 4 Afterpay installments');
+          showToast('Logged in full \u2014 4 installments will charge your card over 6 weeks');
         } else {
           const data = await apiPost('addTransaction', { data: { date, vendor, amount, paymentMethod: method, category, notes, reconciled:false } });
           applyData(data);
@@ -1301,6 +1374,30 @@ function attachHandlers(){
         attachEditHandlers(id);
       });
     });
+    const searchInput = document.getElementById('log-search');
+    if(searchInput){
+      searchInput.addEventListener('input', ()=>{
+        logFilterSearch = searchInput.value;
+        render();
+        const el = document.getElementById('log-search');
+        if(el){ el.focus(); const v = el.value; el.setSelectionRange(v.length, v.length); }
+      });
+    }
+    const methodFilter = document.getElementById('log-filter-method');
+    if(methodFilter){
+      methodFilter.addEventListener('change', ()=>{ logFilterMethod = methodFilter.value; render(); });
+    }
+    const categoryFilter = document.getElementById('log-filter-category');
+    if(categoryFilter){
+      categoryFilter.addEventListener('change', ()=>{ logFilterCategory = categoryFilter.value; render(); });
+    }
+    const clearFiltersBtn = document.getElementById('clear-log-filters-btn');
+    if(clearFiltersBtn){
+      clearFiltersBtn.addEventListener('click', ()=>{
+        logFilterMethod = ''; logFilterCategory = ''; logFilterSearch = '';
+        render();
+      });
+    }
   }
 
   if(currentView === 'reconcile'){
@@ -1348,6 +1445,12 @@ function attachHandlers(){
   }
 
   if(currentView === 'settings'){
+    document.querySelectorAll('[data-jump]').forEach(btn=>{
+      btn.addEventListener('click', ()=>{
+        const target = document.getElementById(btn.dataset.jump);
+        if(target) target.scrollIntoView({behavior:'smooth', block:'start'});
+      });
+    });
     document.getElementById('do-transfer-btn').addEventListener('click', async ()=>{
       const from = document.getElementById('tr-from').value;
       const to = document.getElementById('tr-to').value;
@@ -1359,7 +1462,7 @@ function attachHandlers(){
       const btn = document.getElementById('do-transfer-btn');
       btn.disabled = true; btn.textContent = 'Transferring…';
       try{
-        await ensureTransferCategory();
+        await ensureCategoryExists(TRANSFER_CATEGORY);
         const txns = [];
         if(hasLedger(from)){
           txns.push({ date, vendor: `Transfer to ${to}`, amount, paymentMethod: from, category: TRANSFER_CATEGORY, notes, reconciled:false });
@@ -1597,9 +1700,9 @@ function attachHandlers(){
     document.querySelectorAll('[data-remove-category]').forEach(btn=>{
       btn.addEventListener('click', async ()=>{
         const catName = btn.dataset.removeCategory;
-        const isSystemCategory = catName === TRANSFER_CATEGORY || catName === GIFT_CARD_LOAD_CATEGORY;
+        const isSystemCategory = SYSTEM_CATEGORIES.includes(catName);
         const msg = isSystemCategory
-          ? `"${catName}" is used automatically by Transfers/Gift Cards — removing it from this list won't stop that (it'll just get re-added next time it's needed). Remove anyway?`
+          ? `"${catName}" is used automatically by Transfers/Gift Cards/Afterpay — removing it from this list won't stop that (it'll just get re-added next time it's needed). Remove anyway?`
           : `Remove the "${catName}" category?`;
         if(!confirmDelete(msg)) return;
         const categories = (state.settings.categories||[]).filter(c=>c!==catName);
