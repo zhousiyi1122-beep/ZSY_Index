@@ -371,6 +371,22 @@ function hasLedger(name){
 const AFTERPAY_INSTALLMENT_CATEGORY = 'Afterpay Installment';
 const SYSTEM_CATEGORIES = [TRANSFER_CATEGORY, GIFT_CARD_LOAD_CATEGORY, AFTERPAY_INSTALLMENT_CATEGORY];
 
+/* ============ Income ============ */
+// A negative amount already means "money in" throughout this app (that's
+// how transfer deposits work). Income reuses that same convention: a
+// negative amount on an ordinary (non-system) category is income rather
+// than a spend correction. No schema change needed.
+function isIncomeTxn(t){
+  return t.amount < 0 && !SYSTEM_CATEGORIES.includes(t.category);
+}
+function incomeTag(t){
+  return isIncomeTxn(t) ? `<span class="tag" style="color:var(--money);">Income</span>` : '';
+}
+function txnAmountHtml(t){
+  if(isIncomeTxn(t)) return `<span style="color:var(--money);">+${fmtMoney(Math.abs(t.amount))}</span>`;
+  return fmtMoney(t.amount);
+}
+
 /* ============ Scheduled payments ============ */
 function getSchedules(){ return state.settings.schedules || []; }
 function scheduleMethodOptions(){ return allPaymentMethodOptions().filter(m=>m!=='Afterpay'); }
@@ -658,10 +674,12 @@ function viewDashboard(){
   // real spend already gets recognized elsewhere (gift card redemption
   // hits its real category; the Afterpay purchase is booked in full up
   // front). Non-monetary gift card funding (points, promotions) never
-  // involved real money at all. All of that is kept out of both spend
-  // widgets below. They still count normally toward account balances,
-  // card statements, and reconciliation, which is computed separately.
-  const monthTxns = state.transactions.filter(t => t.date.slice(0,7) === now.slice(0,7) && !SYSTEM_CATEGORIES.includes(t.category) && !isNonMonetarySource(t.paymentMethod));
+  // involved real money at all. Income is money coming in, not spend.
+  // All of that is kept out of both spend widgets below. They still count
+  // normally toward account balances, card statements, and reconciliation,
+  // which is computed separately.
+  const monthTxns = state.transactions.filter(t => t.date.slice(0,7) === now.slice(0,7) && !SYSTEM_CATEGORIES.includes(t.category) && !isNonMonetarySource(t.paymentMethod) && !isIncomeTxn(t));
+  const monthIncomeTxns = state.transactions.filter(t => t.date.slice(0,7) === now.slice(0,7) && isIncomeTxn(t));
   const methodList = allPaymentMethodOptions();
   const byMethod = {};
   methodList.forEach(m => byMethod[m] = 0);
@@ -742,8 +760,26 @@ function viewDashboard(){
         </div>`).join('')}
     </div>` : '';
 
+  const totalIncome = monthIncomeTxns.reduce((s,t)=>s+Math.abs(t.amount),0);
+  const byIncomeCat = {};
+  monthIncomeTxns.forEach(t => byIncomeCat[t.category] = (byIncomeCat[t.category]||0) + Math.abs(t.amount));
+  const incomeCatEntries = Object.entries(byIncomeCat).sort((a,b)=>b[1]-a[1]);
+  const maxIncomeCat = incomeCatEntries.length ? incomeCatEntries[0][1] : 1;
+  const incomeSection = totalIncome > 0.001 ? `
+    <div class="card">
+      <div class="card-title">Income this month</div>
+      <div class="mono" style="font-size:22px;font-weight:600;color:var(--money);">${fmtMoney(totalIncome)}</div>
+      ${incomeCatEntries.length>1 ? incomeCatEntries.map(([cat,amt])=>`
+        <div class="catbar-row" style="margin-top:10px;">
+          <div class="name">${escapeHtml(cat)}</div>
+          <div class="catbar-track"><div class="catbar-fill" style="width:${Math.max(4,(amt/maxIncomeCat*100))}%;background:var(--money);"></div></div>
+          <div class="amt">${fmtMoney(amt)}</div>
+        </div>`).join('') : ''}
+    </div>` : '';
+
   return `
     ${accountSections}
+    ${incomeSection}
     ${afterpaySection}
     <div class="card">
       <div class="card-title">Spend by payment method — this month</div>
@@ -779,6 +815,12 @@ function viewAdd(){
 
         <label for="f-amount">Amount (AUD)</label>
         <input type="number" id="f-amount" class="mono" step="0.01" min="0" placeholder="0.00" required>
+
+        <label>Type</label>
+        <div class="pill-group" id="f-type-group">
+          <div class="pill active" data-value="expense">Expense</div>
+          <div class="pill" data-value="income">Income</div>
+        </div>
 
         <label>Method of payment</label>
         <div class="pill-group" id="f-method-group">
@@ -862,10 +904,10 @@ function viewLog(){
       <div class="txn-item" data-id="${t.id}">
         <div class="txn-left">
           <div class="vendor">${escapeHtml(t.vendor)}</div>
-          <div class="meta"><span class="tag">${escapeHtml(t.paymentMethod)}</span><span class="tag">${escapeHtml(t.category)}</span>${afterpayTag(t)}${scheduledTag(t.notes)}${giftCardTag(t)}</div>
+          <div class="meta"><span class="tag">${escapeHtml(t.paymentMethod)}</span><span class="tag">${escapeHtml(t.category)}</span>${afterpayTag(t)}${scheduledTag(t.notes)}${giftCardTag(t)}${incomeTag(t)}</div>
         </div>
         <div class="txn-right">
-          <div class="amt">${fmtMoney(t.amount)}</div>
+          <div class="amt">${txnAmountHtml(t)}</div>
           ${isCardMethod(t.paymentMethod) ? `<div class="rec ${t.reconciled?'yes':'no'}">${t.reconciled?'reconciled':'pending'}</div>` : ''}
         </div>
       </div>`;
@@ -897,7 +939,13 @@ function viewEditTxn(id){
         <input type="text" id="ef-vendor" value="${escapeHtml(t.vendor)}" required>
 
         <label for="ef-amount">Amount (AUD)</label>
-        <input type="number" id="ef-amount" class="mono" step="0.01" min="0" value="${t.amount}" required>
+        <input type="number" id="ef-amount" class="mono" step="0.01" min="0" value="${Math.abs(t.amount)}" required>
+
+        <label>Type</label>
+        <div class="pill-group" id="ef-type-group">
+          <div class="pill${t.amount<0?'':' active'}" data-value="expense">Expense</div>
+          <div class="pill${t.amount<0?' active':''}" data-value="income">Income</div>
+        </div>
 
         <label>Method of payment</label>
         <div class="pill-group" id="ef-method-group">
@@ -1416,6 +1464,12 @@ function escapeHtml(str){
 /* ============ Event handling per view ============ */
 function attachHandlers(){
   if(currentView === 'add'){
+    document.querySelectorAll('#f-type-group .pill').forEach(p=>{
+      p.addEventListener('click', ()=>{
+        document.querySelectorAll('#f-type-group .pill').forEach(x=>x.classList.remove('active'));
+        p.classList.add('active');
+      });
+    });
     document.querySelectorAll('#f-method-group .pill').forEach(p=>{
       p.addEventListener('click', ()=>{
         document.querySelectorAll('#f-method-group .pill').forEach(x=>x.classList.remove('active'));
@@ -1444,7 +1498,9 @@ function attachHandlers(){
       e.preventDefault();
       const date = document.getElementById('f-date').value;
       const vendor = document.getElementById('f-vendor').value.trim();
-      const amount = parseFloat(document.getElementById('f-amount').value);
+      const rawAmount = parseFloat(document.getElementById('f-amount').value);
+      const isIncome = document.querySelector('#f-type-group .pill.active')?.dataset.value === 'income';
+      const amount = isIncome ? -Math.abs(rawAmount) : Math.abs(rawAmount);
       const method = document.querySelector('#f-method-group .pill.active')?.dataset.value || allPaymentMethodOptions()[0];
       const category = document.querySelector('#f-category-group .pill.active')?.dataset.value || (state.settings.categories||[])[0];
       const notes = document.getElementById('f-notes').value.trim();
@@ -2046,6 +2102,12 @@ function attachEditHandlers(id){
   document.getElementById('cancel-edit-btn').addEventListener('click', ()=>{
     setView('log');
   });
+  document.querySelectorAll('#ef-type-group .pill').forEach(p=>{
+    p.addEventListener('click', ()=>{
+      document.querySelectorAll('#ef-type-group .pill').forEach(x=>x.classList.remove('active'));
+      p.classList.add('active');
+    });
+  });
   document.querySelectorAll('#ef-method-group .pill').forEach(p=>{
     p.addEventListener('click', ()=>{
       document.querySelectorAll('#ef-method-group .pill').forEach(x=>x.classList.remove('active'));
@@ -2062,11 +2124,13 @@ function attachEditHandlers(id){
     e.preventDefault();
     const t = state.transactions.find(x=>String(x.id)===String(id));
     if(!t) return;
+    const rawAmount = parseFloat(document.getElementById('ef-amount').value);
+    const isIncome = document.querySelector('#ef-type-group .pill.active')?.dataset.value === 'income';
     const updated = {
       id: t.id,
       date: document.getElementById('ef-date').value,
       vendor: document.getElementById('ef-vendor').value.trim(),
-      amount: parseFloat(document.getElementById('ef-amount').value),
+      amount: isIncome ? -Math.abs(rawAmount) : Math.abs(rawAmount),
       paymentMethod: document.querySelector('#ef-method-group .pill.active')?.dataset.value || t.paymentMethod,
       category: document.querySelector('#ef-category-group .pill.active')?.dataset.value || t.category,
       notes: document.getElementById('ef-notes').value.trim(),
