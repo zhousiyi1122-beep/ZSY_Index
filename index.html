@@ -272,6 +272,7 @@ let logFilterMethod = '';
 let logFilterCategory = '';
 let logFilterSearch = '';
 let settingsSubView = null;
+let editingNonMonetary = null;
 
 function uid(){ return Date.now().toString(36) + Math.random().toString(36).slice(2,7); }
 
@@ -317,8 +318,25 @@ function giftCardTag(t){
 }
 // Same full, live list as Transfer money — any current payment method
 // except Afterpay (its 4-installment split doesn't fit a single amount).
+// Non-monetary sources (loyalty points, promotions) are offered alongside
+// these but kept as a separate group — see below.
 function giftCardFundingOptions(){
   return allPaymentMethodOptions().filter(m => m !== 'Afterpay');
+}
+// Funding sources where no real money moved — loyalty points redeemed,
+// a merchant promo, a free gift card. Never offered as a normal payment
+// method anywhere else, and loading a gift card this way is excluded
+// from the Dashboard's spend widgets since nothing was actually spent.
+function getNonMonetarySources(){ return state.settings.nonMonetarySources || []; }
+function isNonMonetarySource(name){ return getNonMonetarySources().includes(name); }
+function giftCardFundingOptionsHtml(selected){
+  const monetary = giftCardFundingOptions();
+  const nonMonetary = getNonMonetarySources();
+  let html = `<optgroup label="Monetary">${monetary.map(m=>`<option value="${escapeHtml(m)}"${m===selected?' selected':''}>${escapeHtml(m)}</option>`).join('')}</optgroup>`;
+  if(nonMonetary.length){
+    html += `<optgroup label="Non-monetary">${nonMonetary.map(m=>`<option value="${escapeHtml(m)}"${m===selected?' selected':''}>${escapeHtml(m)}</option>`).join('')}</optgroup>`;
+  }
+  return html;
 }
 // Categories used automatically by Transfers/Gift Cards/Afterpay are left
 // out of the manual picker — they still exist in Settings and still work,
@@ -639,14 +657,19 @@ function viewDashboard(){
   // all move money without being a real expense in their own right — the
   // real spend already gets recognized elsewhere (gift card redemption
   // hits its real category; the Afterpay purchase is booked in full up
-  // front). So all three are kept out of both spend widgets below. They
-  // still count normally toward account balances, card statements, and
-  // reconciliation, which is computed separately from this.
-  const monthTxns = state.transactions.filter(t => t.date.slice(0,7) === now.slice(0,7) && !SYSTEM_CATEGORIES.includes(t.category));
+  // front). Non-monetary gift card funding (points, promotions) never
+  // involved real money at all. All of that is kept out of both spend
+  // widgets below. They still count normally toward account balances,
+  // card statements, and reconciliation, which is computed separately.
+  const monthTxns = state.transactions.filter(t => t.date.slice(0,7) === now.slice(0,7) && !SYSTEM_CATEGORIES.includes(t.category) && !isNonMonetarySource(t.paymentMethod));
   const methodList = allPaymentMethodOptions();
   const byMethod = {};
   methodList.forEach(m => byMethod[m] = 0);
   monthTxns.forEach(t => byMethod[t.paymentMethod] = (byMethod[t.paymentMethod]||0) + t.amount);
+  // Afterpay's tile shows what's still owed overall (shrinking as each
+  // installment posts to its card), not just this month's purchases —
+  // matches the "Afterpay — still owing" card below.
+  if(methodList.includes('Afterpay')) byMethod['Afterpay'] = totalAfterpayOutstanding();
 
   const byCat = {};
   monthTxns.forEach(t => byCat[t.category] = (byCat[t.category]||0) + t.amount);
@@ -656,7 +679,7 @@ function viewDashboard(){
   let methodCards = methodList.map(m => `
     <div class="metric">
       <div class="v">${fmtMoney(byMethod[m]||0)}</div>
-      <div class="l">${escapeHtml(m)}</div>
+      <div class="l">${escapeHtml(m)}${m==='Afterpay'?' (owing)':''}</div>
     </div>`).join('');
 
   let catBars = catEntries.length ? catEntries.map(([cat,amt])=>`
@@ -698,7 +721,7 @@ function viewDashboard(){
 
   const giftCardSections = getGiftCards().length ? `
     <div class="card">
-      <div class="card-title">Gift cards</div>
+      <div class="card-title">Gift Card Balance</div>
       ${getGiftCards().map(g=>{
         const bal = giftCardBalance(g);
         return `
@@ -990,6 +1013,7 @@ const SETTINGS_MENU = [
   { key:'transfer', icon:'\ud83d\udd01', title:'Transfer money', subtitle: () => 'Move money between methods without it counting as spend', render: settingsSectionTransfer },
   { key:'cards', icon:'\ud83d\udcb3', title:'Credit cards', subtitle: () => `${getCards().length} card${getCards().length===1?'':'s'} \u00b7 closing dates & limits`, render: settingsSectionCards },
   { key:'giftcards', icon:'\ud83c\udf81', title:'Gift cards', subtitle: () => `${getGiftCards().length} gift card${getGiftCards().length===1?'':'s'} tracked`, render: settingsSectionGiftCards },
+  { key:'nonmonetary', icon:'\ud83c\udf9f\ufe0f', title:'Non-monetary sources', subtitle: () => `${getNonMonetarySources().length} source${getNonMonetarySources().length===1?'':'s'} \u00b7 points, promos, free gift cards`, render: settingsSectionNonMonetary },
   { key:'merchants', icon:'\ud83c\udfec', title:'Merchants', subtitle: () => `${state.merchants.length} saved vendor${state.merchants.length===1?'':'s'}`, render: settingsSectionMerchants },
   { key:'categories', icon:'\ud83c\udff7\ufe0f', title:'Categories', subtitle: () => `${(state.settings.categories||[]).length} categories`, render: settingsSectionCategories },
   { key:'methods', icon:'\ud83d\udcb5', title:'Payment methods', subtitle: () => `${(state.settings.paymentMethods||[]).length} non-card methods`, render: settingsSectionMethods },
@@ -1139,7 +1163,7 @@ function settingsSectionGiftCards(){
           <label for="egc-date-${g.id}">Date loaded</label>
           <input type="date" id="egc-date-${g.id}" value="${g.loadedDate}">
           <label for="egc-card-${g.id}">Funding source</label>
-          <select id="egc-card-${g.id}">${giftCardFundingOptions().map(m=>`<option value="${escapeHtml(m)}"${m===g.cardName?' selected':''}>${escapeHtml(m)}</option>`).join('')}</select>
+          <select id="egc-card-${g.id}">${giftCardFundingOptionsHtml(g.cardName)}</select>
           <label for="egc-notes-${g.id}">Notes (optional)</label>
           <textarea id="egc-notes-${g.id}" rows="2" placeholder="Anything worth remembering">${escapeHtml(g.notes||'')}</textarea>
           <div class="row-flex" style="margin-top:14px;">
@@ -1158,7 +1182,7 @@ function settingsSectionGiftCards(){
           </div>
         </div>`).join('') : `<div class="empty">No gift cards yet.</div>`}
       <div style="margin-top:14px;">
-        ${giftCardFundingOptions().length ? `
+        ${(giftCardFundingOptions().length || getNonMonetarySources().length) ? `
           <label for="ng-name">Gift card name</label>
           <input type="text" id="ng-name" placeholder="e.g. iTunes Gift Card">
           <label for="ng-amount">Loaded amount (AUD)</label>
@@ -1166,11 +1190,40 @@ function settingsSectionGiftCards(){
           <label for="ng-date">Date loaded</label>
           <input type="date" id="ng-date" value="${todayStr()}">
           <label for="ng-card">Funding source</label>
-          <select id="ng-card">${giftCardFundingOptions().map(m=>`<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join('')}</select>
+          <select id="ng-card">${giftCardFundingOptionsHtml(null)}</select>
           <label for="ng-notes">Notes (optional)</label>
           <textarea id="ng-notes" rows="2" placeholder="Anything worth remembering"></textarea>
           <button class="btn secondary" id="add-giftcard-btn" style="margin-top:14px;">Load gift card</button>
         ` : `<div class="helptext" style="color:var(--pending);">Add a payment method first — gift cards need a source to charge to.</div>`}
+      </div>
+    </div>
+  `;
+}
+
+function settingsSectionNonMonetary(){
+  const list = getNonMonetarySources();
+  return `
+    <div class="card">
+      <div class="card-title">Non-monetary funding sources</div>
+      <div class="helptext" style="margin-bottom:10px;">For gift cards you got without spending real money — loyalty points redeemed, a merchant promotion, a freebie. These show up as a separate group when picking a gift card's funding source, never appear as a normal payment method anywhere else in the app, and loading a gift card this way is left out of the Dashboard's spend widgets since nothing was actually spent.</div>
+      ${list.length ? list.map(m=> m===editingNonMonetary ? `
+        <div class="list-row" style="display:block;padding-bottom:14px;">
+          <input type="text" id="enm-input" value="${escapeHtml(m)}">
+          <div class="row-flex" style="margin-top:10px;">
+            <button class="btn" style="margin-top:0;" data-save-nonmonetary="${escapeHtml(m)}">Save</button>
+            <button class="btn secondary" style="margin-top:0;" data-cancel-nonmonetary>Cancel</button>
+          </div>
+        </div>` : `
+        <div class="list-row">
+          <div class="n">${escapeHtml(m)}</div>
+          <div class="row-actions">
+            <button class="x-btn" data-edit-nonmonetary="${escapeHtml(m)}" style="color:var(--ink-dim);">&#9998;</button>
+            <button class="x-btn" data-remove-nonmonetary="${escapeHtml(m)}">&times;</button>
+          </div>
+        </div>`).join('') : `<div class="empty">None configured yet.</div>`}
+      <div class="chip-add">
+        <input type="text" id="new-nonmonetary-input" placeholder="e.g. Loyalty Points">
+        <button id="add-nonmonetary-btn">Add</button>
       </div>
     </div>
   `;
@@ -1723,6 +1776,57 @@ function attachHandlers(){
           showToast('Gift card removed');
           render();
         }catch(err){ setSync('bad'); showToast('Could not delete', true); }
+      });
+    });
+
+    document.getElementById('add-nonmonetary-btn')?.addEventListener('click', async ()=>{
+      const v = document.getElementById('new-nonmonetary-input').value.trim();
+      if(!v) return;
+      if(getNonMonetarySources().includes(v) || allPaymentMethodOptions().includes(v)){
+        showToast('That name is already in use'); return;
+      }
+      const nonMonetarySources = [...getNonMonetarySources(), v];
+      try{
+        const data = await apiPost('saveSettings', { data: { nonMonetarySources } });
+        applyData(data);
+        render();
+      }catch(err){ setSync('bad'); showToast('Could not save', true); }
+    });
+    document.querySelectorAll('[data-edit-nonmonetary]').forEach(btn=>{
+      btn.addEventListener('click', ()=>{ editingNonMonetary = btn.dataset.editNonmonetary; render(); });
+    });
+    document.querySelectorAll('[data-cancel-nonmonetary]').forEach(btn=>{
+      btn.addEventListener('click', ()=>{ editingNonMonetary = null; render(); });
+    });
+    document.querySelectorAll('[data-save-nonmonetary]').forEach(btn=>{
+      btn.addEventListener('click', async ()=>{
+        const oldName = btn.dataset.saveNonmonetary;
+        const newName = document.getElementById('enm-input').value.trim();
+        if(!newName){ return; }
+        if(newName === oldName){ editingNonMonetary = null; render(); return; }
+        if(getNonMonetarySources().includes(newName) || allPaymentMethodOptions().includes(newName)){
+          showToast('That name is already in use', true); return;
+        }
+        const nonMonetarySources = getNonMonetarySources().map(x=>x===oldName?newName:x);
+        try{
+          await apiPost('renamePaymentMethod', { oldName, newName });
+          const data = await apiPost('saveSettings', { data: { nonMonetarySources } });
+          applyData(data);
+          editingNonMonetary = null;
+          showToast('Renamed');
+          render();
+        }catch(err){ setSync('bad'); showToast('Could not save', true); }
+      });
+    });
+    document.querySelectorAll('[data-remove-nonmonetary]').forEach(btn=>{
+      btn.addEventListener('click', async ()=>{
+        if(!confirmDelete(`Remove "${btn.dataset.removeNonmonetary}" as a non-monetary source?`)) return;
+        const nonMonetarySources = getNonMonetarySources().filter(x=>x!==btn.dataset.removeNonmonetary);
+        try{
+          const data = await apiPost('saveSettings', { data: { nonMonetarySources } });
+          applyData(data);
+          render();
+        }catch(err){ setSync('bad'); showToast('Could not save', true); }
       });
     });
 
