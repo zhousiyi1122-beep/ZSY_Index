@@ -643,9 +643,14 @@ function renderHeader(){
     const key = periodKeyFor(now, c.closingDay||15);
     const end = periodEndFor(now, c.closingDay||15);
     const daysLeft = Math.round((end - new Date(now+'T00:00:00')) / 86400000);
-    const spend = state.transactions.filter(t => t.paymentMethod===c.name && periodKeyFor(t.date, c.closingDay||15)===key)
-      .reduce((s,t)=>s+t.amount,0);
-    return { card:c, key, daysLeft, spend };
+    const periodTxns = state.transactions.filter(t => t.paymentMethod===c.name && periodKeyFor(t.date, c.closingDay||15)===key);
+    // Only count what's actually happened so far — a future-dated Afterpay
+    // installment sitting in the same statement period as today shouldn't
+    // read as already charged just because its date falls before the
+    // period closes.
+    const spend = periodTxns.filter(t=>t.date<=now).reduce((s,t)=>s+t.amount,0);
+    const upcoming = periodTxns.filter(t=>t.date>now).reduce((s,t)=>s+t.amount,0);
+    return { card:c, key, daysLeft, spend, upcoming };
   });
   const unreconciled = state.transactions.filter(t => isCardMethod(t.paymentMethod) && !t.reconciled).length;
 
@@ -654,9 +659,13 @@ function renderHeader(){
   // most urgent one still reads first.
   [...cardStats].sort((a,b)=>a.daysLeft-b.daysLeft).forEach(cs=>{
     statsHtml += `<div class="stat-chip${cs.daysLeft<=3?' warn':''}"><b>${fmtMoney(cs.spend)}</b> ${escapeHtml(cs.card.name)} \u00b7 ${cs.daysLeft}d to close</div>`;
+    if(cs.upcoming > 0.001){
+      statsHtml += `<div class="stat-chip"><b>${fmtMoney(cs.upcoming)}</b> ${escapeHtml(cs.card.name)} upcoming</div>`;
+    }
     if(cs.card.creditLimit){
-      const over = cs.spend > cs.card.creditLimit;
-      statsHtml += `<div class="stat-chip${over?' bad':''}"><b>${fmtMoney(cs.card.creditLimit - cs.spend)}</b> ${escapeHtml(cs.card.name)} headroom</div>`;
+      const committed = cs.spend + cs.upcoming;
+      const over = committed > cs.card.creditLimit;
+      statsHtml += `<div class="stat-chip${over?' bad':''}"><b>${fmtMoney(cs.card.creditLimit - committed)}</b> ${escapeHtml(cs.card.name)} headroom</div>`;
     }
   });
   if(unreconciled>0) statsHtml += `<div class="stat-chip warn"><b>${unreconciled}</b> unreconciled</div>`;
@@ -678,8 +687,8 @@ function viewDashboard(){
   // All of that is kept out of both spend widgets below. They still count
   // normally toward account balances, card statements, and reconciliation,
   // which is computed separately.
-  const monthTxns = state.transactions.filter(t => t.date.slice(0,7) === now.slice(0,7) && !SYSTEM_CATEGORIES.includes(t.category) && !isNonMonetarySource(t.paymentMethod) && !isIncomeTxn(t));
-  const monthIncomeTxns = state.transactions.filter(t => t.date.slice(0,7) === now.slice(0,7) && isIncomeTxn(t));
+  const monthTxns = state.transactions.filter(t => t.date.slice(0,7) === now.slice(0,7) && t.date <= now && !SYSTEM_CATEGORIES.includes(t.category) && !isNonMonetarySource(t.paymentMethod) && !isIncomeTxn(t));
+  const monthIncomeTxns = state.transactions.filter(t => t.date.slice(0,7) === now.slice(0,7) && t.date <= now && isIncomeTxn(t));
   const methodList = allPaymentMethodOptions();
   const byMethod = {};
   methodList.forEach(m => byMethod[m] = 0);
@@ -709,8 +718,10 @@ function viewDashboard(){
 
   const cardSections = cards.map(c=>{
     const key = periodKeyFor(now, c.closingDay||15);
-    const spend = state.transactions.filter(t=>t.paymentMethod===c.name && periodKeyFor(t.date, c.closingDay||15)===key)
-      .reduce((s,t)=>s+t.amount,0);
+    const periodTxns = state.transactions.filter(t=>t.paymentMethod===c.name && periodKeyFor(t.date, c.closingDay||15)===key);
+    const spend = periodTxns.filter(t=>t.date<=now).reduce((s,t)=>s+t.amount,0);
+    const upcoming = periodTxns.filter(t=>t.date>now).reduce((s,t)=>s+t.amount,0);
+    const committed = spend + upcoming;
     const periodRec = ((state.settings.periods||{})[c.id]||{})[key];
     return `
       <div class="card">
@@ -722,7 +733,8 @@ function viewDashboard(){
           </div>
           <div class="mono" style="font-size:18px;font-weight:600;">${fmtMoney(spend)}</div>
         </div>
-        ${c.creditLimit ? `<div class="helptext" style="margin-top:8px;">${fmtMoney(c.creditLimit - spend)} of ${fmtMoney(c.creditLimit)} limit remaining</div>` : ''}
+        ${upcoming > 0.001 ? `<div class="helptext" style="margin-top:8px;">${fmtMoney(upcoming)} more scheduled before this period closes (e.g. Afterpay installments) \u2014 not charged yet</div>` : ''}
+        ${c.creditLimit ? `<div class="helptext" style="margin-top:8px;">${fmtMoney(c.creditLimit - committed)} of ${fmtMoney(c.creditLimit)} limit remaining once scheduled charges land</div>` : ''}
         ${periodRec && periodRec.closed ? `<div class="helptext" style="color:var(--money);margin-top:8px;">Reconciled against statement of ${fmtMoney(periodRec.actualTotal)}</div>` : ''}
       </div>`;
   }).join('');
