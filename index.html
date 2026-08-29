@@ -863,7 +863,13 @@ function viewAdd(){
 
 /* ============ Log ============ */
 function viewLog(){
-  const allSorted = [...state.transactions].sort((a,b)=> b.date.localeCompare(a.date) || String(b.id).localeCompare(String(a.id)));
+  const today = todayStr();
+  // Future-dated Afterpay installments already exist in the sheet so the
+  // dashboard can plan ahead, but they haven't actually charged yet — the
+  // Log is a record of what's happened, so they're left out here (with a
+  // note, so they're not just silently missing).
+  const upcomingCount = state.transactions.filter(t => t.date > today).length;
+  const allSorted = state.transactions.filter(t => t.date <= today).sort((a,b)=> b.date.localeCompare(a.date) || String(b.id).localeCompare(String(a.id)));
   const methodOptions = allPaymentMethodOptions();
   const categoryOptions = state.settings.categories||[];
   // Known vendors: anything saved in Merchants plus any vendor name that's
@@ -880,6 +886,8 @@ function viewLog(){
     (!search || t.vendor === search)
   );
   const filtersActive = !!(logFilterMethod || logFilterCategory || search);
+
+  const upcomingNote = upcomingCount>0 ? `<div class="helptext" style="text-align:center;margin:-4px 0 12px;">${upcomingCount} upcoming installment${upcomingCount===1?'':'s'} not shown yet \u2014 see Dashboard for what's scheduled</div>` : '';
 
   const filterBar = `
     <div class="card">
@@ -900,7 +908,7 @@ function viewLog(){
         ${categoryOptions.map(c=>`<option value="${escapeHtml(c)}"${c===logFilterCategory?' selected':''}>${escapeHtml(c)}</option>`).join('')}
       </select>
       ${filtersActive ? `<button class="btn secondary" id="clear-log-filters-btn" style="margin-top:14px;">Clear filters</button>` : ''}
-    </div>`;
+    </div>${upcomingNote}`;
 
   if(!allSorted.length) return `<div class="card"><div class="empty">No transactions yet. Tap Add to log your first one.</div></div>`;
   if(!sorted.length) return filterBar + `<div class="card"><div class="empty">No transactions match this filter.</div></div>`;
