@@ -1720,16 +1720,16 @@ function attachHandlers(){
     });
     document.querySelectorAll('.close-period-btn').forEach(btn=>{
       btn.addEventListener('click', async ()=>{
-        const cardId = btn.dataset.card;
-        const key = btn.dataset.period;
-        const pid = cardId + '__' + key;
-        const input = document.getElementById('actual-'+pid);
-        const actual = parseFloat(input.value);
-        const cardPeriods = (state.settings.periods||{})[cardId] || {};
-        const isClosed = cardPeriods[key] && cardPeriods[key].closed;
-        const periods = Object.assign({}, state.settings.periods);
-        periods[cardId] = Object.assign({}, cardPeriods, { [key]: { closed: !isClosed, actualTotal: isNaN(actual)?null:actual } });
         try{
+          const cardId = btn.dataset.card;
+          const key = btn.dataset.period;
+          const pid = cardId + '__' + key;
+          const input = document.getElementById('actual-'+pid);
+          const actual = input ? parseFloat(input.value) : NaN;
+          const cardPeriods = (state.settings.periods||{})[cardId] || {};
+          const isClosed = cardPeriods[key] && cardPeriods[key].closed;
+          const periods = Object.assign({}, state.settings.periods);
+          periods[cardId] = Object.assign({}, cardPeriods, { [key]: { closed: !isClosed, actualTotal: isNaN(actual)?null:actual } });
           const data = await apiPost('saveSettings', { data: { periods } });
           applyData(data);
           showToast(isClosed ? 'Period reopened' : 'Period marked reconciled');
@@ -1743,12 +1743,12 @@ function attachHandlers(){
     document.querySelectorAll('.clear-period-btn').forEach(btn=>{
       btn.addEventListener('click', async ()=>{
         if(!confirmDelete('Clear this period\'s reconciliation record? This removes the closed status and the actual-statement figure you entered \u2014 the transactions themselves stay in the log untouched.')) return;
-        const cardId = btn.dataset.card;
-        const key = btn.dataset.period;
-        const cardPeriods = Object.assign({}, (state.settings.periods||{})[cardId] || {});
-        delete cardPeriods[key];
-        const periods = Object.assign({}, state.settings.periods, { [cardId]: cardPeriods });
         try{
+          const cardId = btn.dataset.card;
+          const key = btn.dataset.period;
+          const cardPeriods = Object.assign({}, (state.settings.periods||{})[cardId] || {});
+          delete cardPeriods[key];
+          const periods = Object.assign({}, state.settings.periods, { [cardId]: cardPeriods });
           const data = await apiPost('saveSettings', { data: { periods } });
           applyData(data);
           showToast('Reconciliation record cleared');
