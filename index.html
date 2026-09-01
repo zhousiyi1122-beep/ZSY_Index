@@ -389,6 +389,10 @@ function txnAmountHtml(t){
 
 /* ============ Scheduled payments ============ */
 function getSchedules(){ return state.settings.schedules || []; }
+function getDueForConfirmation(){
+  const today = todayStr();
+  return getSchedules().filter(sc => sc.active !== false && sc.autoPost === false && sc.nextDue && sc.nextDue <= today);
+}
 function scheduleMethodOptions(){ return allPaymentMethodOptions().filter(m=>m!=='Afterpay'); }
 function frequencyLabel(f){ return f==='weekly' ? 'Weekly' : f==='fortnightly' ? 'Fortnightly' : 'Monthly'; }
 
@@ -762,6 +766,23 @@ function viewDashboard(){
       }).join('')}
     </div>` : '';
 
+  const dueSchedules = getDueForConfirmation();
+  const dueSection = dueSchedules.length ? `
+    <div class="card">
+      <div class="card-title">Due for confirmation</div>
+      ${dueSchedules.map(sc=>`
+        <div class="list-row" style="display:block;">
+          <div style="display:flex;justify-content:space-between;align-items:baseline;">
+            <div class="n">${escapeHtml(sc.vendor)}</div>
+            <div class="helptext">due ${fmtDate(sc.nextDue)} \u00b7 ${escapeHtml(sc.paymentMethod)}</div>
+          </div>
+          <div class="row-flex" style="margin-top:8px;">
+            <input type="number" class="mono due-confirm-amount" data-schedule-id="${sc.id}" step="0.01" min="0" value="${sc.amount}" style="flex:1;">
+            <button class="btn secondary" style="margin-top:0;flex:0 0 auto;" data-confirm-schedule="${sc.id}">Confirm</button>
+          </div>
+        </div>`).join('')}
+    </div>` : '';
+
   const afterpaySection = afterpayGroups().length ? `
     <div class="card">
       <div class="card-title">Afterpay — still owing</div>
@@ -790,6 +811,7 @@ function viewDashboard(){
     </div>` : '';
 
   return `
+    ${dueSection}
     ${accountSections}
     ${incomeSection}
     ${afterpaySection}
@@ -1403,13 +1425,18 @@ function settingsSectionSchedules(){
   return `
     <div class="card">
       <div class="card-title">Scheduled payments</div>
-      <div class="helptext" style="margin-bottom:10px;">Regular payments — rent, subscriptions, loan repayments — log themselves automatically on their due date, catching up on anything missed since you last opened the app. For true background automation even when the app's closed, open <code>Code.gs</code> in the Apps Script editor, select <code>createDailyScheduleTrigger</code> in the function dropdown, and click Run once (one-time authorization).</div>
+      <div class="helptext" style="margin-bottom:10px;">"Auto-log" schedules record themselves on their due date, catching up on anything missed since you last opened the app. "Confirm each time" schedules wait instead — they show up as due on the Dashboard until you tap Confirm, so you get one-tap logging without re-typing the whole entry, and a chance to adjust the amount if it varies (a utility bill, say). For true background automation of auto-log schedules even when the app's closed, open <code>Code.gs</code> in the Apps Script editor, select <code>createDailyScheduleTrigger</code> in the function dropdown, and click Run once (one-time authorization).</div>
       ${getSchedules().length ? getSchedules().map(sc=> sc.id===editingScheduleId ? `
         <div class="list-row" style="display:block;padding-bottom:14px;">
           <label for="esch-vendor-${sc.id}">Vendor</label>
           <input type="text" id="esch-vendor-${sc.id}" value="${escapeHtml(sc.vendor)}">
           <label for="esch-amount-${sc.id}">Amount (AUD)</label>
           <input type="number" id="esch-amount-${sc.id}" class="mono" step="0.01" min="0" value="${sc.amount}">
+          <label>Reminder type</label>
+          <div class="pill-group" id="esch-autopost-${sc.id}">
+            <div class="pill${sc.autoPost===false?'':' active'}" data-value="auto">Auto-log</div>
+            <div class="pill${sc.autoPost===false?' active':''}" data-value="confirm">Confirm each time</div>
+          </div>
           <label for="esch-method-${sc.id}">Payment method</label>
           <select id="esch-method-${sc.id}">${scheduleMethodOptions().map(m=>`<option value="${escapeHtml(m)}"${m===sc.paymentMethod?' selected':''}>${escapeHtml(m)}</option>`).join('')}</select>
           <label for="esch-category-${sc.id}">Category</label>
@@ -1432,7 +1459,7 @@ function settingsSectionSchedules(){
         <div class="list-row">
           <div>
             <div class="n">${escapeHtml(sc.vendor)} \u00b7 ${fmtMoney(sc.amount)}</div>
-            <div class="m">${frequencyLabel(sc.frequency)} \u00b7 ${escapeHtml(sc.paymentMethod)} \u00b7 next ${fmtDate(sc.nextDue)}</div>
+            <div class="m">${frequencyLabel(sc.frequency)} \u00b7 ${escapeHtml(sc.paymentMethod)} \u00b7 next ${fmtDate(sc.nextDue)} \u00b7 ${sc.autoPost===false?'confirm each time':'auto-log'}</div>
           </div>
           <div class="row-actions">
             <button class="x-btn" data-edit-schedule="${sc.id}" style="color:var(--ink-dim);">&#9998;</button>
@@ -1444,6 +1471,11 @@ function settingsSectionSchedules(){
         <input type="text" id="ns-vendor" placeholder="e.g. Xero subscription">
         <label for="ns-amount">Amount (AUD)</label>
         <input type="number" id="ns-amount" class="mono" step="0.01" min="0" placeholder="0.00">
+        <label>Reminder type</label>
+        <div class="pill-group" id="ns-autopost-group">
+          <div class="pill active" data-value="auto">Auto-log</div>
+          <div class="pill" data-value="confirm">Confirm each time</div>
+        </div>
         <label for="ns-method">Payment method</label>
         <select id="ns-method">${scheduleMethodOptions().map(m=>`<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join('')}</select>
         <label for="ns-category">Category</label>
@@ -1483,6 +1515,26 @@ function escapeHtml(str){
 
 /* ============ Event handling per view ============ */
 function attachHandlers(){
+  if(currentView === 'dashboard'){
+    document.querySelectorAll('[data-confirm-schedule]').forEach(btn=>{
+      btn.addEventListener('click', async ()=>{
+        const id = btn.dataset.confirmSchedule;
+        const amountInput = document.querySelector(`.due-confirm-amount[data-schedule-id="${id}"]`);
+        const amount = amountInput ? parseFloat(amountInput.value) : undefined;
+        btn.disabled = true; btn.textContent = 'Confirming…';
+        try{
+          const data = await apiPost('confirmSchedule', { id, amount });
+          applyData(data);
+          showToast('Confirmed and logged');
+          render();
+        }catch(err){
+          setSync('bad');
+          showToast('Could not confirm', true);
+          btn.disabled = false; btn.textContent = 'Confirm';
+        }
+      });
+    });
+  }
   if(currentView === 'add'){
     document.querySelectorAll('#f-type-group .pill').forEach(p=>{
       p.addEventListener('click', ()=>{
@@ -2043,14 +2095,22 @@ function attachHandlers(){
       });
     });
 
+    document.querySelectorAll('#ns-autopost-group .pill').forEach(p=>{
+      p.addEventListener('click', ()=>{
+        document.querySelectorAll('#ns-autopost-group .pill').forEach(x=>x.classList.remove('active'));
+        p.classList.add('active');
+      });
+    });
     document.getElementById('add-schedule-btn')?.addEventListener('click', async ()=>{
       const vendor = document.getElementById('ns-vendor').value.trim();
       const amount = parseFloat(document.getElementById('ns-amount').value);
       if(!vendor || isNaN(amount)) return;
+      const autoPost = document.querySelector('#ns-autopost-group .pill.active')?.dataset.value !== 'confirm';
       const schedule = {
         id: uid(),
         vendor,
         amount,
+        autoPost,
         paymentMethod: document.getElementById('ns-method').value,
         category: document.getElementById('ns-category').value,
         frequency: document.getElementById('ns-freq').value,
@@ -2072,16 +2132,25 @@ function attachHandlers(){
     document.querySelectorAll('[data-cancel-schedule]').forEach(btn=>{
       btn.addEventListener('click', ()=>{ editingScheduleId = null; render(); });
     });
+    document.querySelectorAll('[id^="esch-autopost-"] .pill').forEach(p=>{
+      p.addEventListener('click', ()=>{
+        const group = p.parentElement;
+        group.querySelectorAll('.pill').forEach(x=>x.classList.remove('active'));
+        p.classList.add('active');
+      });
+    });
     document.querySelectorAll('[data-save-schedule]').forEach(btn=>{
       btn.addEventListener('click', async ()=>{
         const id = btn.dataset.saveSchedule;
         const vendor = document.getElementById(`esch-vendor-${id}`).value.trim();
         const amount = parseFloat(document.getElementById(`esch-amount-${id}`).value);
         if(!vendor || isNaN(amount)) return;
+        const autoPost = document.querySelector(`#esch-autopost-${id} .pill.active`)?.dataset.value !== 'confirm';
         const schedules = getSchedules().map(sc => sc.id!==id ? sc : {
           ...sc,
           vendor,
           amount,
+          autoPost,
           paymentMethod: document.getElementById(`esch-method-${id}`).value,
           category: document.getElementById(`esch-category-${id}`).value,
           frequency: document.getElementById(`esch-freq-${id}`).value,
