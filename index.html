@@ -437,18 +437,33 @@ function afterpayGroups(){
   state.transactions.forEach(t=>{
     const key = afterpayGroupKey(t);
     if(!key) return;
-    (groups[key] = groups[key] || { vendor: t.vendor, installments: [] }).installments.push(t);
+    (groups[key] = groups[key] || { vendor: t.vendor, installments: [], upfront: null }).all = groups[key].all || [];
+    groups[key].all.push(t);
   });
   const today = todayStr();
   return Object.values(groups).map(g=>{
+    g.all.forEach(t=>{
+      if(t.category === AFTERPAY_INSTALLMENT_CATEGORY) g.installments.push(t);
+      else g.upfront = t; // legacy groups (logged before the upfront transaction existed) won't have one
+    });
     g.installments.sort((a,b)=>a.date.localeCompare(b.date));
     const total = g.installments.reduce((s,t)=>s+t.amount,0);
     const remaining = g.installments.filter(t=>t.date > today).reduce((s,t)=>s+t.amount,0);
     const nextInstallment = g.installments.find(t=>t.date > today) || null;
-    return { vendor: g.vendor, total, remaining, nextInstallment, installments: g.installments };
+    return { vendor: g.vendor, total, remaining, nextInstallment, installments: g.installments, upfront: g.upfront, all: g.all };
   })
   .filter(g => g.remaining > 0.001)
   .sort((a,b) => (a.nextInstallment?a.nextInstallment.date:'9999-99-99').localeCompare(b.nextInstallment?b.nextInstallment.date:'9999-99-99'));
+}
+
+// Unlike afterpayGroups(), this isn't filtered to "still owing" purchases —
+// used for delete/reschedule actions which need to find every linked
+// transaction (upfront + all 4 installments) regardless of whether the
+// purchase is already fully paid off.
+function findAfterpayGroupTransactions(t){
+  const key = afterpayGroupKey(t);
+  if(!key) return [];
+  return state.transactions.filter(x => afterpayGroupKey(x) === key);
 }
 
 function totalAfterpayOutstanding(){
@@ -865,7 +880,9 @@ function viewAdd(){
           ${cards.length ? `
             <label for="f-afterpay-card">Charge installments to</label>
             <select id="f-afterpay-card">${cards.map(c=>`<option value="${escapeHtml(c.name)}">${escapeHtml(c.name)}</option>`).join('')}</select>
-            <div class="helptext">Splits into 4 equal payments, two weeks apart, charged to this card — each one lands in that card's own statement and reconciliation.</div>
+            <label for="f-afterpay-first-date">First installment date</label>
+            <input type="date" id="f-afterpay-first-date" value="${todayStr()}">
+            <div class="helptext">Splits into 4 equal payments, two weeks apart from this date, charged to the card above — each one lands in that card's own statement and reconciliation. Doesn't need to match the purchase date above if Afterpay's first debit lands on a different day.</div>
           ` : `<div class="helptext" style="color:var(--pending);">Add a credit card in Settings first — Afterpay installments need one to charge to.</div>`}
         </div>
 
@@ -970,6 +987,20 @@ function viewEditTxn(id){
     cats.unshift(t.category);
   }
   const methods = allPaymentMethodOptions();
+  const groupTxns = findAfterpayGroupTransactions(t);
+  const groupUpcoming = groupTxns.filter(x=>x.category===AFTERPAY_INSTALLMENT_CATEGORY && x.date >= todayStr() && !x.reconciled);
+  const afterpayGroupBlock = groupTxns.length ? `
+    <div class="card">
+      <div class="card-title">Part of an Afterpay purchase</div>
+      <div class="helptext">${groupTxns.length} linked transaction${groupTxns.length===1?'':'s'} (the purchase plus its installments). Deleting or reconciling one alone can leave the others out of sync.</div>
+      ${groupUpcoming.length ? `
+        <label for="reschedule-date" style="margin-top:14px;">Reschedule remaining installments \u2014 new date for the next one</label>
+        <input type="date" id="reschedule-date" value="${groupUpcoming[0].date}">
+        <div class="helptext">Shifts the ${groupUpcoming.length} installment${groupUpcoming.length===1?'':'s'} that haven't been reconciled yet (including today's, if not yet confirmed), 14 days apart from this date. Already-reconciled ones are left alone.</div>
+        <button type="button" class="btn secondary" id="reschedule-afterpay-btn" style="margin-top:10px;">Reschedule</button>
+      ` : ''}
+      <button type="button" class="btn danger" id="delete-afterpay-group-btn" style="margin-top:14px;">Delete entire purchase (${groupTxns.length} transactions)</button>
+    </div>` : '';
   return `
     <div class="card">
       <div class="card-title">Edit transaction</div>
@@ -1006,9 +1037,10 @@ function viewEditTxn(id){
           <button type="submit" class="btn" style="margin-top:0;">Save changes</button>
           <button type="button" class="btn secondary" style="margin-top:0;" id="cancel-edit-btn">Cancel</button>
         </div>
-        <button type="button" class="btn danger" id="delete-txn-btn">Delete transaction</button>
+        <button type="button" class="btn danger" id="delete-txn-btn">Delete ${groupTxns.length ? 'just this line' : 'transaction'}</button>
       </form>
     </div>
+    ${afterpayGroupBlock}
   `;
 }
 
@@ -1590,6 +1622,7 @@ function attachHandlers(){
           }
           await ensureCategoryExists(AFTERPAY_INSTALLMENT_CATEGORY);
           const groupId = uid();
+          const firstInstallmentDate = document.getElementById('f-afterpay-first-date')?.value || date;
           // The full amount is booked immediately, against the real
           // category, as its own "Afterpay" transaction — that's when the
           // expense actually happened. The 4 card installments are kept in
@@ -1599,10 +1632,10 @@ function attachHandlers(){
           // posts.
           const upfront = {
             date, vendor, amount, paymentMethod: 'Afterpay', category,
-            notes: (notes ? notes + ' \u00b7 ' : '') + `Afterpay purchase \u2014 4 installments of ${fmtMoney(amount/4)} charging to ${cardName}`,
+            notes: (notes ? notes + ' \u00b7 ' : '') + `Afterpay purchase \u2014 4 installments of ${fmtMoney(amount/4)} charging to ${cardName} [apg:${groupId}]`,
             reconciled: false
           };
-          const installments = afterpayInstallments(amount, date).map((inst,i)=>({
+          const installments = afterpayInstallments(amount, firstInstallmentDate).map((inst,i)=>({
             date: inst.date,
             vendor,
             amount: inst.amount,
@@ -2240,6 +2273,56 @@ function attachEditHandlers(id){
       showToast('Transaction deleted');
       setView('log');
     }catch(err){ setSync('bad'); showToast('Could not delete', true); }
+  });
+  document.getElementById('delete-afterpay-group-btn')?.addEventListener('click', async ()=>{
+    const t = state.transactions.find(x=>String(x.id)===String(id));
+    if(!t) return;
+    const group = findAfterpayGroupTransactions(t);
+    if(!confirmDelete(`Delete this entire Afterpay purchase? All ${group.length} linked transactions (the purchase and its installments) will be removed, including any reconciled status. This can't be undone.`)) return;
+    const btn = document.getElementById('delete-afterpay-group-btn');
+    btn.disabled = true; btn.textContent = 'Deleting…';
+    try{
+      let data;
+      for(const gt of group){
+        data = await apiPost('deleteTransaction', { id: gt.id });
+      }
+      applyData(data);
+      showToast('Afterpay purchase deleted');
+      setView('log');
+    }catch(err){
+      setSync('bad');
+      showToast('Could not delete the whole purchase \u2014 some transactions may remain', true);
+      btn.disabled = false; btn.textContent = `Delete entire purchase (${group.length} transactions)`;
+    }
+  });
+  document.getElementById('reschedule-afterpay-btn')?.addEventListener('click', async ()=>{
+    const t = state.transactions.find(x=>String(x.id)===String(id));
+    if(!t) return;
+    const newStart = document.getElementById('reschedule-date').value;
+    if(!newStart) return;
+    const group = findAfterpayGroupTransactions(t);
+    const today = todayStr();
+    const upcoming = group.filter(x=>x.category===AFTERPAY_INSTALLMENT_CATEGORY && x.date >= today && !x.reconciled)
+      .sort((a,b)=>a.date.localeCompare(b.date));
+    if(!upcoming.length) return;
+    const btn = document.getElementById('reschedule-afterpay-btn');
+    btn.disabled = true; btn.textContent = 'Rescheduling…';
+    try{
+      let data;
+      for(let i=0;i<upcoming.length;i++){
+        const d = new Date(newStart+'T00:00:00');
+        d.setDate(d.getDate() + i*14);
+        const newDate = d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+        data = await apiPost('updateTransaction', { data: { ...upcoming[i], date: newDate } });
+      }
+      applyData(data);
+      showToast('Remaining installments rescheduled');
+      setView('log');
+    }catch(err){
+      setSync('bad');
+      showToast('Could not reschedule all installments \u2014 check the log', true);
+      btn.disabled = false; btn.textContent = 'Reschedule';
+    }
   });
 }
 
