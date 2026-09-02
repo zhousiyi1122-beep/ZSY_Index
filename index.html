@@ -1581,10 +1581,19 @@ function attachHandlers(){
   if(currentView === 'dashboard'){
     document.querySelectorAll('.afterpay-group-row').forEach(row=>{
       row.addEventListener('click', ()=>{
-        const id = row.dataset.txnId;
-        editReturnView = 'dashboard';
-        document.getElementById('view').innerHTML = viewEditTxn(id);
-        attachEditHandlers(id);
+        try{
+          const id = row.dataset.txnId;
+          if(!id || !state.transactions.some(t=>String(t.id)===String(id))){
+            showToast('Could not find that transaction \u2014 try reloading', true);
+            return;
+          }
+          editReturnView = 'dashboard';
+          document.getElementById('view').innerHTML = viewEditTxn(id);
+          attachEditHandlers(id);
+        }catch(err){
+          console.error('Opening Afterpay group failed', err);
+          showToast('Could not open that purchase', true);
+        }
       });
     });
     document.querySelectorAll('[data-confirm-schedule]').forEach(btn=>{
@@ -1705,10 +1714,15 @@ function attachHandlers(){
   if(currentView === 'log'){
     document.querySelectorAll('.txn-item').forEach(item=>{
       item.addEventListener('click', ()=>{
-        const id = item.dataset.id;
-        editReturnView = 'log';
-        document.getElementById('view').innerHTML = viewEditTxn(id);
-        attachEditHandlers(id);
+        try{
+          const id = item.dataset.id;
+          editReturnView = 'log';
+          document.getElementById('view').innerHTML = viewEditTxn(id);
+          attachEditHandlers(id);
+        }catch(err){
+          console.error('Opening transaction failed', err);
+          showToast('Could not open that transaction', true);
+        }
       });
     });
     const searchInput = document.getElementById('log-search');
@@ -1738,10 +1752,15 @@ function attachHandlers(){
   if(currentView === 'reconcile'){
     document.querySelectorAll('.recon-edit-btn').forEach(btn=>{
       btn.addEventListener('click', ()=>{
-        const id = btn.dataset.id;
-        editReturnView = 'reconcile';
-        document.getElementById('view').innerHTML = viewEditTxn(id);
-        attachEditHandlers(id);
+        try{
+          const id = btn.dataset.id;
+          editReturnView = 'reconcile';
+          document.getElementById('view').innerHTML = viewEditTxn(id);
+          attachEditHandlers(id);
+        }catch(err){
+          console.error('Opening transaction failed', err);
+          showToast('Could not open that transaction', true);
+        }
       });
     });
     document.querySelectorAll('.recon-check').forEach(cb=>{
@@ -2288,7 +2307,8 @@ function attachHandlers(){
 }
 
 function attachEditHandlers(id){
-  document.getElementById('cancel-edit-btn').addEventListener('click', ()=>{
+  try{
+  document.getElementById('cancel-edit-btn')?.addEventListener('click', ()=>{
     setView(editReturnView);
   });
   document.querySelectorAll('#ef-type-group .pill').forEach(p=>{
@@ -2309,7 +2329,7 @@ function attachEditHandlers(id){
       p.classList.add('active');
     });
   });
-  document.getElementById('edit-form').addEventListener('submit', async (e)=>{
+  document.getElementById('edit-form')?.addEventListener('submit', async (e)=>{
     e.preventDefault();
     const t = state.transactions.find(x=>String(x.id)===String(id));
     if(!t) return;
@@ -2332,7 +2352,7 @@ function attachEditHandlers(id){
       setView(editReturnView);
     }catch(err){ setSync('bad'); showToast('Could not save', true); }
   });
-  document.getElementById('delete-txn-btn').addEventListener('click', async ()=>{
+  document.getElementById('delete-txn-btn')?.addEventListener('click', async ()=>{
     if(!confirmDelete('Delete this transaction? This can\'t be undone.')) return;
     try{
       const data = await apiPost('deleteTransaction', { id });
@@ -2391,6 +2411,10 @@ function attachEditHandlers(id){
       btn.disabled = false; btn.textContent = 'Reschedule';
     }
   });
+  }catch(err){
+    console.error('attachEditHandlers failed', err);
+    showToast('This screen may not respond \u2014 try reloading', true);
+  }
 }
 
 /* ============ Boot ============ */
