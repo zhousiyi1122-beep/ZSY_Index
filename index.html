@@ -285,6 +285,7 @@ let editingScheduleId = null;
 let logFilterMethod = '';
 let logFilterCategory = '';
 let logFilterSearch = '';
+let editReturnView = 'log';
 let settingsSubView = null;
 let editingNonMonetary = null;
 
@@ -826,8 +827,9 @@ function viewDashboard(){
   const afterpaySection = afterpayGroups().length ? `
     <div class="card">
       <div class="card-title">Afterpay — still owing</div>
+      <div class="helptext" style="margin-bottom:10px;">Tap one to open it \u2014 from there you can edit or delete the whole purchase, including installments that haven't charged yet.</div>
       ${afterpayGroups().map(g=>`
-        <div class="metric" style="margin-bottom:10px;">
+        <div class="metric afterpay-group-row" data-txn-id="${g.nextInstallment ? g.nextInstallment.id : g.installments[0].id}" style="margin-bottom:10px;cursor:pointer;">
           <div class="v">${fmtMoney(g.remaining)}</div>
           <div class="l">${escapeHtml(g.vendor)} \u00b7 ${g.nextInstallment ? `next ${fmtMoney(g.nextInstallment.amount)} on ${fmtDate(g.nextInstallment.date)} via ${escapeHtml(g.nextInstallment.paymentMethod)}` : 'fully charged'}</div>
         </div>`).join('')}
@@ -1113,6 +1115,7 @@ function viewReconcile(){
               <input type="checkbox" class="recon-check" data-id="${t.id}" ${t.reconciled?'checked':''}>
               <div class="rv">${escapeHtml(t.vendor)} \u00b7 ${fmtDate(t.date)}</div>
               <div class="ra mono">${fmtMoney(t.amount)}</div>
+              <button type="button" class="x-btn recon-edit-btn" data-id="${t.id}" style="color:var(--ink-dim);font-size:15px;padding:2px 6px;">&#9998;</button>
             </div>
           `).join('')}
           <div class="variance">
@@ -1576,6 +1579,14 @@ function escapeHtml(str){
 /* ============ Event handling per view ============ */
 function attachHandlers(){
   if(currentView === 'dashboard'){
+    document.querySelectorAll('.afterpay-group-row').forEach(row=>{
+      row.addEventListener('click', ()=>{
+        const id = row.dataset.txnId;
+        editReturnView = 'dashboard';
+        document.getElementById('view').innerHTML = viewEditTxn(id);
+        attachEditHandlers(id);
+      });
+    });
     document.querySelectorAll('[data-confirm-schedule]').forEach(btn=>{
       btn.addEventListener('click', async ()=>{
         const id = btn.dataset.confirmSchedule;
@@ -1695,6 +1706,7 @@ function attachHandlers(){
     document.querySelectorAll('.txn-item').forEach(item=>{
       item.addEventListener('click', ()=>{
         const id = item.dataset.id;
+        editReturnView = 'log';
         document.getElementById('view').innerHTML = viewEditTxn(id);
         attachEditHandlers(id);
       });
@@ -1724,6 +1736,14 @@ function attachHandlers(){
   }
 
   if(currentView === 'reconcile'){
+    document.querySelectorAll('.recon-edit-btn').forEach(btn=>{
+      btn.addEventListener('click', ()=>{
+        const id = btn.dataset.id;
+        editReturnView = 'reconcile';
+        document.getElementById('view').innerHTML = viewEditTxn(id);
+        attachEditHandlers(id);
+      });
+    });
     document.querySelectorAll('.recon-check').forEach(cb=>{
       cb.addEventListener('change', async ()=>{
         const t = state.transactions.find(x=>String(x.id)===cb.dataset.id);
@@ -2269,7 +2289,7 @@ function attachHandlers(){
 
 function attachEditHandlers(id){
   document.getElementById('cancel-edit-btn').addEventListener('click', ()=>{
-    setView('log');
+    setView(editReturnView);
   });
   document.querySelectorAll('#ef-type-group .pill').forEach(p=>{
     p.addEventListener('click', ()=>{
@@ -2309,7 +2329,7 @@ function attachEditHandlers(id){
       const data = await apiPost('updateTransaction', { data: updated });
       applyData(data);
       showToast('Transaction updated');
-      setView('log');
+      setView(editReturnView);
     }catch(err){ setSync('bad'); showToast('Could not save', true); }
   });
   document.getElementById('delete-txn-btn').addEventListener('click', async ()=>{
@@ -2318,7 +2338,7 @@ function attachEditHandlers(id){
       const data = await apiPost('deleteTransaction', { id });
       applyData(data);
       showToast('Transaction deleted');
-      setView('log');
+      setView(editReturnView);
     }catch(err){ setSync('bad'); showToast('Could not delete', true); }
   });
   document.getElementById('delete-afterpay-group-btn')?.addEventListener('click', async ()=>{
@@ -2335,7 +2355,7 @@ function attachEditHandlers(id){
       }
       applyData(data);
       showToast('Afterpay purchase deleted');
-      setView('log');
+      setView(editReturnView);
     }catch(err){
       setSync('bad');
       showToast('Could not delete the whole purchase \u2014 some transactions may remain', true);
@@ -2364,7 +2384,7 @@ function attachEditHandlers(id){
       }
       applyData(data);
       showToast('Remaining installments rescheduled');
-      setView('log');
+      setView(editReturnView);
     }catch(err){
       setSync('bad');
       showToast('Could not reschedule all installments \u2014 check the log', true);
