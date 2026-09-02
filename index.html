@@ -67,6 +67,20 @@
 
   main{padding:16px 14px 20px;max-width:640px;margin:0 auto;}
 
+  /* Wider layout on desktop/tablet — same shape as TICKR: a centered,
+     roomier column instead of a mobile-width strip stretched across a
+     big screen. */
+  @media (min-width:720px){
+    .topbar{padding-left:calc((100% - 960px)/2 + 18px);padding-right:calc((100% - 960px)/2 + 18px);}
+    main{max-width:960px;padding-left:24px;padding-right:24px;}
+    .grid-2{grid-template-columns:repeat(3,1fr);}
+  }
+  @media (min-width:1100px){
+    .topbar{padding-left:calc((100% - 1100px)/2 + 18px);padding-right:calc((100% - 1100px)/2 + 18px);}
+    main{max-width:1100px;}
+    .grid-2{grid-template-columns:repeat(4,1fr);}
+  }
+
   .card{
     background:var(--surface);
     border:1px solid var(--line);
@@ -636,12 +650,23 @@ document.querySelectorAll('.nav-btn').forEach(b=>{
 function render(){
   const el = document.getElementById('view');
   renderHeader();
-  if(currentView==='dashboard') el.innerHTML = viewDashboard();
-  else if(currentView==='add') el.innerHTML = viewAdd();
-  else if(currentView==='log') el.innerHTML = viewLog();
-  else if(currentView==='reconcile') el.innerHTML = viewReconcile();
-  else if(currentView==='settings') el.innerHTML = viewSettings();
-  attachHandlers();
+  try{
+    if(currentView==='dashboard') el.innerHTML = viewDashboard();
+    else if(currentView==='add') el.innerHTML = viewAdd();
+    else if(currentView==='log') el.innerHTML = viewLog();
+    else if(currentView==='reconcile') el.innerHTML = viewReconcile();
+    else if(currentView==='settings') el.innerHTML = viewSettings();
+  }catch(err){
+    console.error('Render failed for view', currentView, err);
+    el.innerHTML = `<div class="card"><div class="empty">Something went wrong showing this screen.<br><span class="mono" style="font-size:11px;color:var(--alert);">${escapeHtml(String(err && err.message || err))}</span></div></div>`;
+    return;
+  }
+  try{
+    attachHandlers();
+  }catch(err){
+    console.error('Attaching handlers failed for view', currentView, err);
+    showToast('Some buttons on this screen may not respond \u2014 try reloading', true);
+  }
 }
 
 /* ============ Header (balance + close countdown) ============ */
