@@ -1061,7 +1061,7 @@ function viewEditTxn(id){
         <textarea id="ef-notes" rows="2">${escapeHtml(t.notes||'')}</textarea>
 
         <div class="row-flex" style="margin-top:18px;">
-          <button type="submit" class="btn" style="margin-top:0;">Save changes</button>
+          <button type="submit" class="btn" style="margin-top:0;" id="save-edit-btn">Save changes</button>
           <button type="button" class="btn secondary" style="margin-top:0;" id="cancel-edit-btn">Cancel</button>
         </div>
         <button type="button" class="btn danger" id="delete-txn-btn">Delete ${groupTxns.length ? 'just this line' : 'transaction'}</button>
@@ -1899,13 +1899,14 @@ function attachHandlers(){
         const opening = parseFloat(document.getElementById(`eacc-opening-${id}`).value);
         const date = document.getElementById(`eacc-date-${id}`).value;
         if(!name) return;
+        btn.disabled = true; btn.textContent = 'Saving…';
         try{
           const data = await apiPost('updateAccount', { data: { id, name, openingBalance: isNaN(opening)?0:opening, openingBalanceDate: date } });
           applyData(data);
           editingAccountId = null;
           showToast('Account updated');
           render();
-        }catch(err){ setSync('bad'); showToast('Could not save', true); }
+        }catch(err){ setSync('bad'); showToast('Could not save', true); btn.disabled = false; btn.textContent = 'Save'; }
       });
     });
     document.querySelectorAll('[data-remove-account]').forEach(btn=>{
@@ -1948,13 +1949,14 @@ function attachHandlers(){
         const closingDay = parseInt(document.getElementById(`ecard-closing-${id}`).value, 10) || 15;
         const limitRaw = document.getElementById(`ecard-limit-${id}`).value;
         if(!name) return;
+        btn.disabled = true; btn.textContent = 'Saving…';
         try{
           const data = await apiPost('updateCard', { data: { id, name, closingDay, creditLimit: limitRaw==='' ? null : parseFloat(limitRaw) } });
           applyData(data);
           editingCardId = null;
           showToast('Card updated');
           render();
-        }catch(err){ setSync('bad'); showToast('Could not save', true); }
+        }catch(err){ setSync('bad'); showToast('Could not save', true); btn.disabled = false; btn.textContent = 'Save'; }
       });
     });
     document.querySelectorAll('[data-remove-card]').forEach(btn=>{
@@ -2005,13 +2007,14 @@ function attachHandlers(){
         const cardName = document.getElementById(`egc-card-${id}`).value;
         const notes = document.getElementById(`egc-notes-${id}`).value.trim();
         if(!name || isNaN(loadedAmount)) return;
+        btn.disabled = true; btn.textContent = 'Saving…';
         try{
           const data = await apiPost('updateGiftCard', { data: { id, name, loadedAmount, loadedDate, cardName, notes } });
           applyData(data);
           editingGiftCardId = null;
           showToast('Gift card updated');
           render();
-        }catch(err){ setSync('bad'); showToast('Could not save', true); }
+        }catch(err){ setSync('bad'); showToast('Could not save', true); btn.disabled = false; btn.textContent = 'Save'; }
       });
     });
     document.querySelectorAll('[data-remove-giftcard]').forEach(btn=>{
@@ -2055,6 +2058,7 @@ function attachHandlers(){
           showToast('That name is already in use', true); return;
         }
         const nonMonetarySources = getNonMonetarySources().map(x=>x===oldName?newName:x);
+        btn.disabled = true; btn.textContent = 'Saving…';
         try{
           await apiPost('renamePaymentMethod', { oldName, newName });
           const data = await apiPost('saveSettings', { data: { nonMonetarySources } });
@@ -2062,7 +2066,7 @@ function attachHandlers(){
           editingNonMonetary = null;
           showToast('Renamed');
           render();
-        }catch(err){ setSync('bad'); showToast('Could not save', true); }
+        }catch(err){ setSync('bad'); showToast('Could not save', true); btn.disabled = false; btn.textContent = 'Save'; }
       });
     });
     document.querySelectorAll('[data-remove-nonmonetary]').forEach(btn=>{
@@ -2113,13 +2117,14 @@ function attachHandlers(){
         const category = document.getElementById(`em-category-${id}`).value;
         const paymentMethod = document.getElementById(`em-method-${id}`).value;
         if(!name) return;
+        btn.disabled = true; btn.textContent = 'Saving…';
         try{
           const data = await apiPost('updateMerchant', { data: { id, name, category, paymentMethod } });
           applyData(data);
           editingMerchantId = null;
           showToast('Merchant updated');
           render();
-        }catch(err){ setSync('bad'); showToast('Could not save', true); }
+        }catch(err){ setSync('bad'); showToast('Could not save', true); btn.disabled = false; btn.textContent = 'Save'; }
       });
     });
 
@@ -2161,13 +2166,14 @@ function attachHandlers(){
         const newName = document.getElementById('ec-input').value.trim();
         if(!newName){ return; }
         if(newName === oldName){ editingCategory = null; render(); return; }
+        btn.disabled = true; btn.textContent = 'Saving…';
         try{
           const data = await apiPost('renameCategory', { oldName, newName });
           applyData(data);
           editingCategory = null;
           showToast('Category renamed');
           render();
-        }catch(err){ setSync('bad'); showToast('Could not save', true); }
+        }catch(err){ setSync('bad'); showToast('Could not save', true); btn.disabled = false; btn.textContent = 'Save'; }
       });
     });
 
@@ -2204,13 +2210,14 @@ function attachHandlers(){
         const newName = document.getElementById('epm-input').value.trim();
         if(!newName){ return; }
         if(newName === oldName){ editingMethod = null; render(); return; }
+        btn.disabled = true; btn.textContent = 'Saving…';
         try{
           const data = await apiPost('renamePaymentMethod', { oldName, newName });
           applyData(data);
           editingMethod = null;
           showToast('Payment method renamed');
           render();
-        }catch(err){ setSync('bad'); showToast('Could not save', true); }
+        }catch(err){ setSync('bad'); showToast('Could not save', true); btn.disabled = false; btn.textContent = 'Save'; }
       });
     });
 
@@ -2276,13 +2283,14 @@ function attachHandlers(){
           nextDue: document.getElementById(`esch-next-${id}`).value,
           notes: document.getElementById(`esch-notes-${id}`).value.trim()
         });
+        btn.disabled = true; btn.textContent = 'Saving…';
         try{
           const data = await apiPost('saveSettings', { data: { schedules } });
           applyData(data);
           editingScheduleId = null;
           showToast('Scheduled payment updated');
           render();
-        }catch(err){ setSync('bad'); showToast('Could not save', true); }
+        }catch(err){ setSync('bad'); showToast('Could not save', true); btn.disabled = false; btn.textContent = 'Save'; }
       });
     });
     document.querySelectorAll('[data-remove-schedule]').forEach(btn=>{
@@ -2345,12 +2353,17 @@ function attachEditHandlers(id){
       notes: document.getElementById('ef-notes').value.trim(),
       reconciled: t.reconciled
     };
+    const saveBtn = document.getElementById('save-edit-btn');
+    if(saveBtn){ saveBtn.disabled = true; saveBtn.textContent = 'Saving…'; }
     try{
       const data = await apiPost('updateTransaction', { data: updated });
       applyData(data);
       showToast('Transaction updated');
       setView(editReturnView);
-    }catch(err){ setSync('bad'); showToast('Could not save', true); }
+    }catch(err){
+      setSync('bad'); showToast('Could not save', true);
+      if(saveBtn){ saveBtn.disabled = false; saveBtn.textContent = 'Save changes'; }
+    }
   });
   document.getElementById('delete-txn-btn')?.addEventListener('click', async ()=>{
     if(!confirmDelete('Delete this transaction? This can\'t be undone.')) return;
