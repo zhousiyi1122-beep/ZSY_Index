@@ -105,6 +105,7 @@
   .catbar-row .amt{font-family:'IBM Plex Mono',monospace;width:64px;text-align:right;flex:0 0 64px;}
 
   label{display:block;font-size:12px;color:var(--ink-dim);margin:14px 0 6px;letter-spacing:.02em;}
+  #add-form label{font-size:16px;font-weight:700;color:var(--ink);}
   label:first-child{margin-top:0;}
   input[type=text],input[type=number],input[type=date],input[type=url],select,textarea{
     width:100%;background:var(--surface-2);border:1px solid var(--line);color:var(--ink);
@@ -251,6 +252,10 @@
     <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
     Reconcile
   </button>
+  <button class="nav-btn" data-view="report">
+    <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="10" width="4" height="10"/><rect x="10" y="4" width="4" height="16"/><rect x="17" y="14" width="4" height="6"/></svg>
+    Report
+  </button>
   <button class="nav-btn" data-view="settings">
     <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.13.36.35.68.63.94"/></svg>
     Settings
@@ -285,6 +290,7 @@ let editingScheduleId = null;
 let logFilterMethod = '';
 let logFilterCategory = '';
 let logFilterSearch = '';
+let reportMonth = null;
 let editReturnView = 'log';
 let settingsSubView = null;
 let editingNonMonetary = null;
@@ -656,6 +662,7 @@ function render(){
     else if(currentView==='add') el.innerHTML = viewAdd();
     else if(currentView==='log') el.innerHTML = viewLog();
     else if(currentView==='reconcile') el.innerHTML = viewReconcile();
+    else if(currentView==='report') el.innerHTML = viewReport();
     else if(currentView==='settings') el.innerHTML = viewSettings();
   }catch(err){
     console.error('Render failed for view', currentView, err);
@@ -1154,6 +1161,83 @@ function updateVarianceDisplay(cardId, key){
   } else {
     disp.innerHTML = `<span class="variance-bad">Variance of ${fmtMoney(Math.abs(diff))} \u2014 statement is ${diff>0?'higher':'lower'} than logged transactions.</span>`;
   }
+}
+
+/* ============ Report ============ */
+function monthLabel(ym){
+  const [y,m] = ym.split('-').map(Number);
+  return new Date(y, m-1, 1).toLocaleDateString('en-AU', { month: 'long', year: 'numeric' });
+}
+function shiftMonth(ym, delta){
+  const [y,m] = ym.split('-').map(Number);
+  const d = new Date(y, m-1+delta, 1);
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0');
+}
+
+function viewReport(){
+  if(!reportMonth) reportMonth = todayStr().slice(0,7);
+  const ym = reportMonth;
+  const today = todayStr();
+
+  const monthTxns = state.transactions.filter(t =>
+    t.date.slice(0,7) === ym && t.date <= today &&
+    !SYSTEM_CATEGORIES.includes(t.category) && !isNonMonetarySource(t.paymentMethod)
+  );
+  const spendTxns = monthTxns.filter(t => !isIncomeTxn(t));
+  const incomeTxns = monthTxns.filter(t => isIncomeTxn(t));
+
+  const totalSpend = spendTxns.reduce((s,t)=>s+t.amount,0);
+  const totalIncome = incomeTxns.reduce((s,t)=>s+Math.abs(t.amount),0);
+
+  const byCat = {};
+  spendTxns.forEach(t => byCat[t.category] = (byCat[t.category]||0) + t.amount);
+  const catEntries = Object.entries(byCat).sort((a,b)=>b[1]-a[1]);
+  const maxCat = catEntries.length ? catEntries[0][1] : 1;
+
+  const byMethod = {};
+  spendTxns.forEach(t => byMethod[t.paymentMethod] = (byMethod[t.paymentMethod]||0) + t.amount);
+  const methodEntries = Object.entries(byMethod).sort((a,b)=>b[1]-a[1]);
+  const maxMethod = methodEntries.length ? methodEntries[0][1] : 1;
+
+  return `
+    <div class="card">
+      <div class="row-flex" style="align-items:center;">
+        <button type="button" class="btn secondary" style="margin-top:0;flex:0 0 auto;padding:10px 16px;" id="report-prev-month">&#8249;</button>
+        <div style="flex:1;text-align:center;font-size:16px;font-weight:600;">${monthLabel(ym)}</div>
+        <button type="button" class="btn secondary" style="margin-top:0;flex:0 0 auto;padding:10px 16px;" id="report-next-month"${ym>=today.slice(0,7) ? ' disabled' : ''}>&#8250;</button>
+      </div>
+      <div class="grid-2" style="margin-top:14px;">
+        <div class="metric">
+          <div class="v" style="${totalSpend<0?'color:var(--alert);':''}">${fmtMoney(totalSpend)}</div>
+          <div class="l">Total spend</div>
+        </div>
+        <div class="metric">
+          <div class="v" style="color:var(--money);">${fmtMoney(totalIncome)}</div>
+          <div class="l">Total income</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">By category</div>
+      ${catEntries.length ? catEntries.map(([cat,amt])=>`
+        <div class="catbar-row">
+          <div class="name">${escapeHtml(cat)}</div>
+          <div class="catbar-track"><div class="catbar-fill" style="width:${Math.max(4,(amt/maxCat*100))}%"></div></div>
+          <div class="amt">${fmtMoney(amt)}</div>
+        </div>`).join('') : `<div class="empty">No spend logged for ${monthLabel(ym)}.</div>`}
+    </div>
+
+    <div class="card">
+      <div class="card-title">By payment method</div>
+      ${methodEntries.length ? methodEntries.map(([m,amt])=>`
+        <div class="catbar-row">
+          <div class="name">${escapeHtml(m)}</div>
+          <div class="catbar-track"><div class="catbar-fill" style="width:${Math.max(4,(amt/maxMethod*100))}%"></div></div>
+          <div class="amt">${fmtMoney(amt)}</div>
+        </div>`).join('') : `<div class="empty">No spend logged for ${monthLabel(ym)}.</div>`}
+    </div>
+  `;
 }
 
 /* ============ Settings ============ */
@@ -1748,6 +1832,18 @@ function attachHandlers(){
         render();
       });
     }
+  }
+
+  if(currentView === 'report'){
+    document.getElementById('report-prev-month')?.addEventListener('click', ()=>{
+      reportMonth = shiftMonth(reportMonth, -1);
+      render();
+    });
+    document.getElementById('report-next-month')?.addEventListener('click', ()=>{
+      if(reportMonth >= todayStr().slice(0,7)) return;
+      reportMonth = shiftMonth(reportMonth, 1);
+      render();
+    });
   }
 
   if(currentView === 'reconcile'){
