@@ -227,6 +227,7 @@
   <div class="balance-row">
     <span class="balance mono" id="hdr-balance">$0.00</span>
     <span class="balance-label" id="hdr-balance-label">balance</span>
+    <button type="button" id="hdr-toggle-btn" aria-label="Toggle details" style="margin-left:auto;align-self:center;background:none;border:none;color:var(--ink-dim);font-size:18px;cursor:pointer;padding:4px 6px;line-height:1;">&#9662;</button>
   </div>
   <div class="sub-stats" id="hdr-substats"></div>
 </div>
@@ -291,6 +292,7 @@ let logFilterMethod = '';
 let logFilterCategory = '';
 let logFilterSearch = '';
 let reportMonth = null;
+let headerExpanded = localStorage.getItem('ledger_header_expanded') !== '0';
 let editReturnView = 'log';
 let settingsSubView = null;
 let editingNonMonetary = null;
@@ -653,6 +655,11 @@ function setView(v){
 document.querySelectorAll('.nav-btn').forEach(b=>{
   b.addEventListener('click', ()=> setView(b.dataset.view));
 });
+document.getElementById('hdr-toggle-btn')?.addEventListener('click', ()=>{
+  headerExpanded = !headerExpanded;
+  localStorage.setItem('ledger_header_expanded', headerExpanded ? '1' : '0');
+  renderHeader();
+});
 
 function render(){
   const el = document.getElementById('view');
@@ -688,6 +695,11 @@ function renderHeader(){
     accounts.length === 0 ? 'no accounts set up' :
     accounts.length === 1 ? `${escapeHtml(accounts[0].name)} balance` :
     `combined balance \u00b7 ${accounts.length} accounts`;
+
+  const substatsEl = document.getElementById('hdr-substats');
+  const toggleBtn = document.getElementById('hdr-toggle-btn');
+  if(substatsEl) substatsEl.style.display = headerExpanded ? '' : 'none';
+  if(toggleBtn) toggleBtn.innerHTML = headerExpanded ? '&#9662;' : '&#9656;';
 
   const now = todayStr();
   const cards = getCards();
