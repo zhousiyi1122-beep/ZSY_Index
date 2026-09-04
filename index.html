@@ -1431,6 +1431,7 @@ function settingsSectionCategories(){
   return `
     <div class="card">
       <div class="card-title">Categories</div>
+      <div class="helptext" style="margin-bottom:10px;">Categories marked "system" can be deleted (with a warning) but not renamed — Afterpay, Transfers, and Gift Cards rely on their exact name internally, and a rename would silently break how they're tracked.</div>
       ${(s.categories||[]).map(c=> c===editingCategory ? `
         <div class="list-row" style="display:block;padding-bottom:14px;">
           <input type="text" id="ec-input" value="${escapeHtml(c)}">
@@ -1440,9 +1441,9 @@ function settingsSectionCategories(){
           </div>
         </div>` : `
         <div class="list-row">
-          <div class="n">${escapeHtml(c)}</div>
+          <div class="n">${escapeHtml(c)}${SYSTEM_CATEGORIES.includes(c) ? ' <span class="tag" style="margin-left:4px;">system</span>' : ''}</div>
           <div class="row-actions">
-            <button class="x-btn" data-edit-category="${escapeHtml(c)}" style="color:var(--ink-dim);">&#9998;</button>
+            ${SYSTEM_CATEGORIES.includes(c) ? '' : `<button class="x-btn" data-edit-category="${escapeHtml(c)}" style="color:var(--ink-dim);">&#9998;</button>`}
             <button class="x-btn" data-remove-category="${escapeHtml(c)}">&times;</button>
           </div>
         </div>`).join('')}
