@@ -3,8 +3,12 @@
  * Caches the app shell (HTML/manifest/icons) so the app installs and opens
  * offline. It deliberately does NOT cache calls to the Apps Script API —
  * transaction data always goes live to the Google Sheet, never stale.
+ *
+ * Strategy: network-first. Every load tries the network before anything
+ * else, so a redeploy shows up on the very next load — no "reload twice"
+ * lag. The cache is only used as a fallback when there's no connection.
  */
-const CACHE_NAME = 'ledger-shell-v1';
+const CACHE_NAME = 'ledger-shell-v2';
 const SHELL_FILES = [
   './',
   './index.html',
@@ -39,17 +43,15 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Same-origin shell files: cache-first, falling back to network, and
-  // updating the cache in the background so the next load picks up changes.
+  // Same-origin shell files: network-first. Try the network; whatever comes
+  // back also refreshes the cache. Only fall back to the cached copy if the
+  // network request fails outright (offline).
   event.respondWith(
-    caches.match(event.request).then((cached) => {
-      const networkFetch = fetch(event.request).then((response) => {
-        if (response && response.ok) {
-          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, response.clone()));
-        }
-        return response;
-      }).catch(() => cached);
-      return cached || networkFetch;
-    })
+    fetch(event.request).then((response) => {
+      if (response && response.ok) {
+        caches.open(CACHE_NAME).then((cache) => cache.put(event.request, response.clone()));
+      }
+      return response;
+    }).catch(() => caches.match(event.request))
   );
 });
