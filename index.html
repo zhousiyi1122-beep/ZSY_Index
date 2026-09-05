@@ -143,6 +143,8 @@
   .row-flex{display:flex;gap:10px;}
   .row-flex .btn{margin-top:0;}
   .helptext{font-size:11.5px;color:var(--ink-dim);margin-top:6px;line-height:1.4;}
+  .field-error{border-color:var(--alert) !important;box-shadow:0 0 0 1px var(--alert);}
+  .field-error-msg{font-size:11.5px;color:var(--alert);margin-top:4px;line-height:1.4;}
 
   .txn-item{
     display:flex;justify-content:space-between;align-items:flex-start;
@@ -902,14 +904,17 @@ function viewAdd(){
       <form id="add-form">
         <label for="f-date">Date</label>
         <input type="date" id="f-date" value="${todayStr()}" required>
+        <div class="field-error-msg" id="f-date-error"></div>
 
         <label for="f-vendor">Vendor</label>
         <input type="text" id="f-vendor" list="merchant-list" placeholder="e.g. Bunnings, Officeworks" autocomplete="off" required>
         <datalist id="merchant-list">${merchantOptions}</datalist>
         <div class="helptext">Type a new vendor and it'll be saved to your merchant list automatically.</div>
+        <div class="field-error-msg" id="f-vendor-error"></div>
 
         <label for="f-amount">Amount (AUD)</label>
         <input type="number" id="f-amount" class="mono" step="0.01" min="0" placeholder="0.00" required>
+        <div class="field-error-msg" id="f-amount-error"></div>
 
         <label>Type</label>
         <div class="pill-group" id="f-type-group">
@@ -1713,6 +1718,13 @@ function attachHandlers(){
     });
   }
   if(currentView === 'add'){
+    ['f-date','f-vendor','f-amount'].forEach(id=>{
+      const el = document.getElementById(id);
+      el?.addEventListener('input', ()=>{
+        el.classList.remove('field-error');
+        const msg = document.getElementById(id+'-error'); if(msg) msg.textContent = '';
+      });
+    });
     document.querySelectorAll('#f-type-group .pill').forEach(p=>{
       p.addEventListener('click', ()=>{
         document.querySelectorAll('#f-type-group .pill').forEach(x=>x.classList.remove('active'));
@@ -1753,7 +1765,37 @@ function attachHandlers(){
       const method = document.querySelector('#f-method-group .pill.active')?.dataset.value || allPaymentMethodOptions()[0];
       const category = document.querySelector('#f-category-group .pill.active')?.dataset.value || (state.settings.categories||[])[0];
       const notes = document.getElementById('f-notes').value.trim();
-      if(!vendor || isNaN(amount)) return;
+
+      // Clear any previous error state before re-checking.
+      ['f-date','f-vendor','f-amount'].forEach(id=>{
+        document.getElementById(id)?.classList.remove('field-error');
+        const msg = document.getElementById(id+'-error'); if(msg) msg.textContent = '';
+      });
+      let firstInvalid = null;
+      let invalidCount = 0;
+      if(!date){
+        document.getElementById('f-date').classList.add('field-error');
+        document.getElementById('f-date-error').textContent = 'Date is required.';
+        firstInvalid = firstInvalid || 'f-date';
+        invalidCount++;
+      }
+      if(!vendor){
+        document.getElementById('f-vendor').classList.add('field-error');
+        document.getElementById('f-vendor-error').textContent = 'Vendor is required.';
+        firstInvalid = firstInvalid || 'f-vendor';
+        invalidCount++;
+      }
+      if(isNaN(rawAmount) || rawAmount <= 0){
+        document.getElementById('f-amount').classList.add('field-error');
+        document.getElementById('f-amount-error').textContent = 'Enter an amount greater than zero.';
+        firstInvalid = firstInvalid || 'f-amount';
+        invalidCount++;
+      }
+      if(firstInvalid){
+        showToast(invalidCount > 1 ? 'Please fill in the highlighted fields' : 'Please fill in the highlighted field', true);
+        document.getElementById(firstInvalid).focus();
+        return;
+      }
       const btn = document.getElementById('add-submit-btn');
       btn.disabled = true; btn.textContent = 'Saving…';
       try{
@@ -1916,6 +1958,7 @@ function attachHandlers(){
     document.querySelectorAll('.clear-period-btn').forEach(btn=>{
       btn.addEventListener('click', async ()=>{
         if(!confirmDelete('Clear this period\'s reconciliation record? This removes the closed status and the actual-statement figure you entered \u2014 the transactions themselves stay in the log untouched.')) return;
+        btn.disabled = true; const origText = btn.textContent; btn.textContent = '\u2026';
         try{
           const cardId = btn.dataset.card;
           const key = btn.dataset.period;
@@ -1928,7 +1971,7 @@ function attachHandlers(){
           render();
         }catch(err){
           setSync('bad');
-          showToast('Could not sync that change', true);
+          showToast('Could not sync that change', true); btn.disabled = false; btn.textContent = origText;
         }
       });
     });
@@ -1988,12 +2031,14 @@ function attachHandlers(){
       }
       const opening = parseFloat(document.getElementById('na-opening').value);
       const date = document.getElementById('na-date').value;
+      const addAccountBtn = document.getElementById('add-account-btn');
+      addAccountBtn.disabled = true; const origText = addAccountBtn.textContent; addAccountBtn.textContent = 'Adding…';
       try{
         const data = await apiPost('addAccount', { data: { name, openingBalance: isNaN(opening)?0:opening, openingBalanceDate: date } });
         applyData(data);
         showToast('Account added');
         render();
-      }catch(err){ setSync('bad'); showToast('Could not save', true); }
+      }catch(err){ setSync('bad'); showToast('Could not save', true); addAccountBtn.disabled = false; addAccountBtn.textContent = origText; }
     });
     document.querySelectorAll('[data-edit-account]').forEach(btn=>{
       btn.addEventListener('click', ()=>{ editingAccountId = btn.dataset.editAccount; render(); });
@@ -2021,12 +2066,13 @@ function attachHandlers(){
     document.querySelectorAll('[data-remove-account]').forEach(btn=>{
       btn.addEventListener('click', async ()=>{
         if(!confirmDelete('Remove this account? Its balance history stays in the log, but it stops being tracked.')) return;
+        btn.disabled = true; const origText = btn.textContent; btn.textContent = '\u2026';
         try{
           const data = await apiPost('deleteAccount', { id: btn.dataset.removeAccount });
           applyData(data);
           showToast('Account removed');
           render();
-        }catch(err){ setSync('bad'); showToast('Could not delete', true); }
+        }catch(err){ setSync('bad'); showToast('Could not delete', true); btn.disabled = false; btn.textContent = origText; }
       });
     });
 
@@ -2038,12 +2084,14 @@ function attachHandlers(){
       }
       const closingDay = parseInt(document.getElementById('nc-closing').value, 10) || 15;
       const limitRaw = document.getElementById('nc-limit').value;
+      const addCardBtn = document.getElementById('add-card-btn');
+      addCardBtn.disabled = true; const origText = addCardBtn.textContent; addCardBtn.textContent = 'Adding…';
       try{
         const data = await apiPost('addCard', { data: { name, closingDay, creditLimit: limitRaw==='' ? null : parseFloat(limitRaw) } });
         applyData(data);
         showToast('Card added');
         render();
-      }catch(err){ setSync('bad'); showToast('Could not save', true); }
+      }catch(err){ setSync('bad'); showToast('Could not save', true); addCardBtn.disabled = false; addCardBtn.textContent = origText; }
     });
     document.querySelectorAll('[data-edit-card]').forEach(btn=>{
       btn.addEventListener('click', ()=>{ editingCardId = btn.dataset.editCard; render(); });
@@ -2071,12 +2119,13 @@ function attachHandlers(){
     document.querySelectorAll('[data-remove-card]').forEach(btn=>{
       btn.addEventListener('click', async ()=>{
         if(!confirmDelete('Remove this card? Its transaction history stays in the log, but reconciliation stops tracking it.')) return;
+        btn.disabled = true; const origText = btn.textContent; btn.textContent = '\u2026';
         try{
           const data = await apiPost('deleteCard', { id: btn.dataset.removeCard });
           applyData(data);
           showToast('Card removed');
           render();
-        }catch(err){ setSync('bad'); showToast('Could not delete', true); }
+        }catch(err){ setSync('bad'); showToast('Could not delete', true); btn.disabled = false; btn.textContent = origText; }
       });
     });
 
@@ -2093,12 +2142,13 @@ function attachHandlers(){
         const loadedDate = document.getElementById('ng-date').value;
         const cardName = document.getElementById('ng-card').value;
         const notes = document.getElementById('ng-notes').value.trim();
+        addGiftCardBtn.disabled = true; const origText = addGiftCardBtn.textContent; addGiftCardBtn.textContent = 'Adding…';
         try{
           const data = await apiPost('addGiftCard', { data: { name, loadedAmount, loadedDate, cardName, notes } });
           applyData(data);
           showToast('Gift card loaded');
           render();
-        }catch(err){ setSync('bad'); showToast('Could not save', true); }
+        }catch(err){ setSync('bad'); showToast('Could not save', true); addGiftCardBtn.disabled = false; addGiftCardBtn.textContent = origText; }
       });
     }
     document.querySelectorAll('[data-edit-giftcard]').forEach(btn=>{
@@ -2129,12 +2179,13 @@ function attachHandlers(){
     document.querySelectorAll('[data-remove-giftcard]').forEach(btn=>{
       btn.addEventListener('click', async ()=>{
         if(!confirmDelete('Remove this gift card? Its loading and redemption history stays in the log, but its balance stops being tracked.')) return;
+        btn.disabled = true; const origText = btn.textContent; btn.textContent = '\u2026';
         try{
           const data = await apiPost('deleteGiftCard', { id: btn.dataset.removeGiftcard });
           applyData(data);
           showToast('Gift card removed');
           render();
-        }catch(err){ setSync('bad'); showToast('Could not delete', true); }
+        }catch(err){ setSync('bad'); showToast('Could not delete', true); btn.disabled = false; btn.textContent = origText; }
       });
     });
 
@@ -2145,11 +2196,13 @@ function attachHandlers(){
         showToast('That name is already in use'); return;
       }
       const nonMonetarySources = [...getNonMonetarySources(), v];
+      const addNonMonBtn = document.getElementById('add-nonmonetary-btn');
+      addNonMonBtn.disabled = true; const origText = addNonMonBtn.textContent; addNonMonBtn.textContent = 'Adding…';
       try{
         const data = await apiPost('saveSettings', { data: { nonMonetarySources } });
         applyData(data);
         render();
-      }catch(err){ setSync('bad'); showToast('Could not save', true); }
+      }catch(err){ setSync('bad'); showToast('Could not save', true); addNonMonBtn.disabled = false; addNonMonBtn.textContent = origText; }
     });
     document.querySelectorAll('[data-edit-nonmonetary]').forEach(btn=>{
       btn.addEventListener('click', ()=>{ editingNonMonetary = btn.dataset.editNonmonetary; render(); });
@@ -2181,12 +2234,13 @@ function attachHandlers(){
     document.querySelectorAll('[data-remove-nonmonetary]').forEach(btn=>{
       btn.addEventListener('click', async ()=>{
         if(!confirmDelete(`Remove "${btn.dataset.removeNonmonetary}" as a non-monetary source?`)) return;
+        btn.disabled = true; const origText = btn.textContent; btn.textContent = '\u2026';
         const nonMonetarySources = getNonMonetarySources().filter(x=>x!==btn.dataset.removeNonmonetary);
         try{
           const data = await apiPost('saveSettings', { data: { nonMonetarySources } });
           applyData(data);
           render();
-        }catch(err){ setSync('bad'); showToast('Could not save', true); }
+        }catch(err){ setSync('bad'); showToast('Could not save', true); btn.disabled = false; btn.textContent = origText; }
       });
     });
 
@@ -2194,6 +2248,8 @@ function attachHandlers(){
       const name = document.getElementById('nm-name').value.trim();
       if(!name) return;
       if(findMerchant(name)){ showToast('That merchant already exists'); return; }
+      const addMerchantBtn = document.getElementById('add-merchant-btn');
+      addMerchantBtn.disabled = true; const origText = addMerchantBtn.textContent; addMerchantBtn.textContent = 'Adding…';
       try{
         const data = await apiPost('addMerchant', { data: {
           name, category: document.getElementById('nm-category').value, paymentMethod: document.getElementById('nm-method').value
@@ -2201,16 +2257,17 @@ function attachHandlers(){
         applyData(data);
         showToast('Merchant added');
         render();
-      }catch(err){ setSync('bad'); showToast('Could not save', true); }
+      }catch(err){ setSync('bad'); showToast('Could not save', true); addMerchantBtn.disabled = false; addMerchantBtn.textContent = origText; }
     });
     document.querySelectorAll('[data-remove-merchant]').forEach(btn=>{
       btn.addEventListener('click', async ()=>{
         if(!confirmDelete('Remove this merchant?')) return;
+        btn.disabled = true; const origText = btn.textContent; btn.textContent = '\u2026';
         try{
           const data = await apiPost('deleteMerchant', { id: btn.dataset.removeMerchant });
           applyData(data);
           render();
-        }catch(err){ setSync('bad'); showToast('Could not delete', true); }
+        }catch(err){ setSync('bad'); showToast('Could not delete', true); btn.disabled = false; btn.textContent = origText; }
       });
     });
     document.querySelectorAll('[data-edit-merchant]').forEach(btn=>{
@@ -2241,11 +2298,13 @@ function attachHandlers(){
       const v = document.getElementById('new-category-input').value.trim();
       if(!v || (state.settings.categories||[]).includes(v)) return;
       const categories = [...(state.settings.categories||[]), v];
+      const addCategoryBtn = document.getElementById('add-category-btn');
+      addCategoryBtn.disabled = true; const origText = addCategoryBtn.textContent; addCategoryBtn.textContent = 'Adding…';
       try{
         const data = await apiPost('saveSettings', { data: { categories } });
         applyData(data);
         render();
-      }catch(err){ setSync('bad'); showToast('Could not save', true); }
+      }catch(err){ setSync('bad'); showToast('Could not save', true); addCategoryBtn.disabled = false; addCategoryBtn.textContent = origText; }
     });
     document.querySelectorAll('[data-remove-category]').forEach(btn=>{
       btn.addEventListener('click', async ()=>{
@@ -2255,12 +2314,13 @@ function attachHandlers(){
           ? `"${catName}" is used automatically by Transfers/Gift Cards/Afterpay — removing it from this list won't stop that (it'll just get re-added next time it's needed). Remove anyway?`
           : `Remove the "${catName}" category?`;
         if(!confirmDelete(msg)) return;
+        btn.disabled = true; const origText = btn.textContent; btn.textContent = '\u2026';
         const categories = (state.settings.categories||[]).filter(c=>c!==catName);
         try{
           const data = await apiPost('saveSettings', { data: { categories } });
           applyData(data);
           render();
-        }catch(err){ setSync('bad'); showToast('Could not save', true); }
+        }catch(err){ setSync('bad'); showToast('Could not save', true); btn.disabled = false; btn.textContent = origText; }
       });
     });
     document.querySelectorAll('[data-edit-category]').forEach(btn=>{
@@ -2290,21 +2350,24 @@ function attachHandlers(){
       const v = document.getElementById('new-method-input').value.trim();
       if(!v || (state.settings.paymentMethods||[]).includes(v)) return;
       const paymentMethods = [...(state.settings.paymentMethods||[]), v];
+      const addMethodBtn = document.getElementById('add-method-btn');
+      addMethodBtn.disabled = true; const origText = addMethodBtn.textContent; addMethodBtn.textContent = 'Adding…';
       try{
         const data = await apiPost('saveSettings', { data: { paymentMethods } });
         applyData(data);
         render();
-      }catch(err){ setSync('bad'); showToast('Could not save', true); }
+      }catch(err){ setSync('bad'); showToast('Could not save', true); addMethodBtn.disabled = false; addMethodBtn.textContent = origText; }
     });
     document.querySelectorAll('[data-remove-method]').forEach(btn=>{
       btn.addEventListener('click', async ()=>{
         if(!confirmDelete(`Remove "${btn.dataset.removeMethod}" as a payment method?`)) return;
+        btn.disabled = true; const origText = btn.textContent; btn.textContent = '\u2026';
         const paymentMethods = (state.settings.paymentMethods||[]).filter(m=>m!==btn.dataset.removeMethod);
         try{
           const data = await apiPost('saveSettings', { data: { paymentMethods } });
           applyData(data);
           render();
-        }catch(err){ setSync('bad'); showToast('Could not save', true); }
+        }catch(err){ setSync('bad'); showToast('Could not save', true); btn.disabled = false; btn.textContent = origText; }
       });
     });
     document.querySelectorAll('[data-edit-method]').forEach(btn=>{
@@ -2354,12 +2417,14 @@ function attachHandlers(){
         active: true
       };
       const schedules = [...getSchedules(), schedule];
+      const addScheduleBtn = document.getElementById('add-schedule-btn');
+      addScheduleBtn.disabled = true; const origText = addScheduleBtn.textContent; addScheduleBtn.textContent = 'Adding…';
       try{
         const data = await apiPost('saveSettings', { data: { schedules } });
         applyData(data);
         showToast('Scheduled payment added');
         render();
-      }catch(err){ setSync('bad'); showToast('Could not save', true); }
+      }catch(err){ setSync('bad'); showToast('Could not save', true); addScheduleBtn.disabled = false; addScheduleBtn.textContent = origText; }
     });
     document.querySelectorAll('[data-edit-schedule]').forEach(btn=>{
       btn.addEventListener('click', ()=>{ editingScheduleId = btn.dataset.editSchedule; render(); });
@@ -2405,13 +2470,14 @@ function attachHandlers(){
     document.querySelectorAll('[data-remove-schedule]').forEach(btn=>{
       btn.addEventListener('click', async ()=>{
         if(!confirmDelete('Remove this scheduled payment? It will stop logging automatically.')) return;
+        btn.disabled = true; const origText = btn.textContent; btn.textContent = '\u2026';
         const schedules = getSchedules().filter(sc=>sc.id!==btn.dataset.removeSchedule);
         try{
           const data = await apiPost('saveSettings', { data: { schedules } });
           applyData(data);
           showToast('Scheduled payment removed');
           render();
-        }catch(err){ setSync('bad'); showToast('Could not delete', true); }
+        }catch(err){ setSync('bad'); showToast('Could not delete', true); btn.disabled = false; btn.textContent = origText; }
       });
     });
 
@@ -2476,12 +2542,13 @@ function attachEditHandlers(id){
   });
   document.getElementById('delete-txn-btn')?.addEventListener('click', async ()=>{
     if(!confirmDelete('Delete this transaction? This can\'t be undone.')) return;
+    btn.disabled = true; const origText = btn.textContent; btn.textContent = '\u2026';
     try{
       const data = await apiPost('deleteTransaction', { id });
       applyData(data);
       showToast('Transaction deleted');
       setView(editReturnView);
-    }catch(err){ setSync('bad'); showToast('Could not delete', true); }
+    }catch(err){ setSync('bad'); showToast('Could not delete', true); btn.disabled = false; btn.textContent = origText; }
   });
   document.getElementById('delete-afterpay-group-btn')?.addEventListener('click', async ()=>{
     const t = state.transactions.find(x=>String(x.id)===String(id));
