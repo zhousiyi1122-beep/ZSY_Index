@@ -572,6 +572,29 @@ function applyData(data){
   state.settings = data.settings||{};
 }
 
+// Local-merge helpers for the four hot-path transaction actions (add/update/
+// delete, single or bulk). The backend skips its full refresh for these and
+// just confirms what happened — since the client already knows exactly what
+// it sent, it patches its own copy directly instead of waiting on a full
+// re-read of every transaction ever logged.
+function mergeAddTransaction(t, newId){
+  state.transactions.push({ ...t, id: newId, amount: Number(t.amount) });
+}
+function mergeAddTransactions(list, ids){
+  list.forEach((t,i)=>{
+    state.transactions.push({ ...t, id: ids[i], amount: Number(t.amount) });
+  });
+}
+function mergeUpdateTransaction(t){
+  const idx = state.transactions.findIndex(x=>String(x.id)===String(t.id));
+  const merged = { ...t, amount: Number(t.amount) };
+  if(idx !== -1) state.transactions[idx] = merged;
+  else state.transactions.push(merged);
+}
+function mergeDeleteTransaction(id){
+  state.transactions = state.transactions.filter(x=>String(x.id)!==String(id));
+}
+
 /* ============ Toast ============ */
 function showToast(msg, isError){
   const t = document.getElementById('toast');
@@ -1832,12 +1855,12 @@ function attachHandlers(){
             reconciled: false
           }));
           const data = await apiPost('addTransactions', { data: [upfront, ...installments] });
-          applyData(data);
+          mergeAddTransactions([upfront, ...installments], data.ids);
           await upsertMerchantFromEntry(vendor, category, 'Afterpay');
           showToast('Logged in full \u2014 4 installments will charge your card over 6 weeks');
         } else {
           const data = await apiPost('addTransaction', { data: { date, vendor, amount, paymentMethod: method, category, notes, reconciled:false } });
-          applyData(data);
+          mergeAddTransaction({ date, vendor, amount, paymentMethod: method, category, notes, reconciled:false }, data.id);
           await upsertMerchantFromEntry(vendor, category, method);
           showToast('Transaction saved');
         }
@@ -1921,7 +1944,7 @@ function attachHandlers(){
         t.reconciled = cb.checked;
         try{
           const data = await apiPost('updateTransaction', { data: t });
-          applyData(data);
+          mergeUpdateTransaction(t);
           render();
         }catch(err){
           setSync('bad');
@@ -2009,7 +2032,7 @@ function attachHandlers(){
         }
         if(txns.length){
           const data = await apiPost('addTransactions', { data: txns });
-          applyData(data);
+          mergeAddTransactions(txns, data.ids);
           showToast('Transfer recorded');
         } else {
           showToast('Nothing to record \u2014 neither side tracks a balance');
@@ -2532,7 +2555,7 @@ function attachEditHandlers(id){
     if(saveBtn){ saveBtn.disabled = true; saveBtn.textContent = 'Saving…'; }
     try{
       const data = await apiPost('updateTransaction', { data: updated });
-      applyData(data);
+      mergeUpdateTransaction(updated);
       showToast('Transaction updated');
       setView(editReturnView);
     }catch(err){
@@ -2540,15 +2563,16 @@ function attachEditHandlers(id){
       if(saveBtn){ saveBtn.disabled = false; saveBtn.textContent = 'Save changes'; }
     }
   });
-  document.getElementById('delete-txn-btn')?.addEventListener('click', async ()=>{
+  document.getElementById('delete-txn-btn')?.addEventListener('click', async function(){
     if(!confirmDelete('Delete this transaction? This can\'t be undone.')) return;
-    btn.disabled = true; const origText = btn.textContent; btn.textContent = '\u2026';
+    const delBtn = this;
+    delBtn.disabled = true; const origText = delBtn.textContent; delBtn.textContent = '\u2026';
     try{
       const data = await apiPost('deleteTransaction', { id });
-      applyData(data);
+      mergeDeleteTransaction(id);
       showToast('Transaction deleted');
       setView(editReturnView);
-    }catch(err){ setSync('bad'); showToast('Could not delete', true); btn.disabled = false; btn.textContent = origText; }
+    }catch(err){ setSync('bad'); showToast('Could not delete', true); delBtn.disabled = false; delBtn.textContent = origText; }
   });
   document.getElementById('delete-afterpay-group-btn')?.addEventListener('click', async ()=>{
     const t = state.transactions.find(x=>String(x.id)===String(id));
@@ -2558,11 +2582,10 @@ function attachEditHandlers(id){
     const btn = document.getElementById('delete-afterpay-group-btn');
     btn.disabled = true; btn.textContent = 'Deleting…';
     try{
-      let data;
       for(const gt of group){
-        data = await apiPost('deleteTransaction', { id: gt.id });
+        await apiPost('deleteTransaction', { id: gt.id });
+        mergeDeleteTransaction(gt.id);
       }
-      applyData(data);
       showToast('Afterpay purchase deleted');
       setView(editReturnView);
     }catch(err){
@@ -2584,14 +2607,14 @@ function attachEditHandlers(id){
     const btn = document.getElementById('reschedule-afterpay-btn');
     btn.disabled = true; btn.textContent = 'Rescheduling…';
     try{
-      let data;
       for(let i=0;i<upcoming.length;i++){
         const d = new Date(newStart+'T00:00:00');
         d.setDate(d.getDate() + i*14);
         const newDate = d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
-        data = await apiPost('updateTransaction', { data: { ...upcoming[i], date: newDate } });
+        const updatedInst = { ...upcoming[i], date: newDate };
+        await apiPost('updateTransaction', { data: updatedInst });
+        mergeUpdateTransaction(updatedInst);
       }
-      applyData(data);
       showToast('Remaining installments rescheduled');
       setView(editReturnView);
     }catch(err){
