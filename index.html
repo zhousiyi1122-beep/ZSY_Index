@@ -305,6 +305,18 @@ function uid(){ return Date.now().toString(36) + Math.random().toString(36).slic
 function getCards(){ return state.settings.cards || []; }
 function findCard(name){ return getCards().find(c=>c.name===name); }
 function isCardMethod(name){ return !!findCard(name); }
+// Running balance owed on the card: opening balance plus every charge
+// (positive) and payment (negative — e.g. a Transfer money payoff) since
+// the opening date. Mirrors accountBalance()'s formula but adds instead of
+// subtracting, since a charge increases what's owed rather than decreasing
+// a pool of money.
+function cardBalance(c){
+  const openingDate = c.openingBalanceDate || '1970-01-01';
+  const activity = state.transactions
+    .filter(t => t.date >= openingDate && t.paymentMethod === c.name)
+    .reduce((sum,t) => sum + t.amount, 0);
+  return Number(c.openingBalance||0) + activity;
+}
 function allPaymentMethodOptions(){ return [...(state.settings.paymentMethods||[]), ...getCards().map(c=>c.name), ...getAccounts().map(a=>a.name), ...getGiftCards().map(g=>g.name)]; }
 
 /* ============ Bank / savings accounts ============ */
@@ -810,20 +822,22 @@ function viewDashboard(){
     const periodTxns = state.transactions.filter(t=>t.paymentMethod===c.name && periodKeyFor(t.date, c.closingDay||15)===key);
     const spend = periodTxns.filter(t=>t.date<=now).reduce((s,t)=>s+t.amount,0);
     const upcoming = periodTxns.filter(t=>t.date>now).reduce((s,t)=>s+t.amount,0);
-    const committed = spend + upcoming;
+    const balance = cardBalance(c);
     const periodRec = ((state.settings.periods||{})[c.id]||{})[key];
     return `
       <div class="card">
-        <div class="card-title">${escapeHtml(c.name)} — current statement</div>
-        <div style="display:flex;justify-content:space-between;align-items:center;">
+        <div class="card-title">${escapeHtml(c.name)}</div>
+        <div class="mono" style="font-size:22px;font-weight:600;">${fmtMoney(balance)}</div>
+        <div class="helptext">Balance owed \u2014 opening ${fmtMoney(Number(c.openingBalance||0))} on ${fmtDate(c.openingBalanceDate||now)}, plus every charge and payment since. Change this in Settings.</div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px;padding-top:12px;border-top:1px solid var(--line);">
           <div>
             <div style="font-size:14px;font-weight:600;">${periodLabel(key)}</div>
-            <div class="helptext" style="margin-top:4px;">Closes ${fmtDate(key)}</div>
+            <div class="helptext" style="margin-top:4px;">Current statement \u00b7 closes ${fmtDate(key)}</div>
           </div>
-          <div class="mono" style="font-size:18px;font-weight:600;">${fmtMoney(spend)}</div>
+          <div class="mono" style="font-size:16px;font-weight:600;">${fmtMoney(spend)}</div>
         </div>
         ${upcoming > 0.001 ? `<div class="helptext" style="margin-top:8px;">${fmtMoney(upcoming)} more scheduled before this period closes (e.g. Afterpay installments) \u2014 not charged yet</div>` : ''}
-        ${c.creditLimit ? `<div class="helptext" style="margin-top:8px;">${fmtMoney(c.creditLimit - committed)} of ${fmtMoney(c.creditLimit)} limit remaining once scheduled charges land</div>` : ''}
+        ${c.creditLimit ? `<div class="helptext" style="margin-top:8px;">${fmtMoney(c.creditLimit - balance)} of ${fmtMoney(c.creditLimit)} limit remaining</div>` : ''}
         ${periodRec && periodRec.closed ? `<div class="helptext" style="color:var(--money);margin-top:8px;">Reconciled against statement of ${fmtMoney(periodRec.actualTotal)}</div>` : ''}
       </div>`;
   }).join('');
@@ -1389,7 +1403,7 @@ function settingsSectionCards(){
   return `
     <div class="card">
       <div class="card-title">Credit cards</div>
-      <div class="helptext" style="margin-bottom:10px;">Each card gets its own closing date, credit limit, and reconciliation periods. A card's name doubles as its payment method — pick it in Add/Edit just like Cash or Afterpay.</div>
+      <div class="helptext" style="margin-bottom:10px;">Each card gets its own closing date, credit limit, opening balance, and reconciliation periods. A card's name doubles as its payment method — pick it in Add/Edit just like Cash or Afterpay. Balance owed goes up with charges and down with payments (e.g. a Transfer money payoff).</div>
       ${getCards().length ? getCards().map(c=> c.id===editingCardId ? `
         <div class="list-row" style="display:block;padding-bottom:14px;">
           <label for="ecard-name-${c.id}">Card name</label>
@@ -1398,6 +1412,10 @@ function settingsSectionCards(){
           <input type="number" id="ecard-closing-${c.id}" class="mono" min="1" max="28" value="${c.closingDay||15}">
           <label for="ecard-limit-${c.id}">Credit limit (optional)</label>
           <input type="number" id="ecard-limit-${c.id}" class="mono" step="0.01" min="0" placeholder="e.g. 10000" value="${c.creditLimit!==null && c.creditLimit!==undefined ? c.creditLimit : ''}">
+          <label for="ecard-opening-${c.id}">Opening balance (AUD)</label>
+          <input type="number" id="ecard-opening-${c.id}" class="mono" step="0.01" value="${Number(c.openingBalance||0)}">
+          <label for="ecard-opening-date-${c.id}">As of date</label>
+          <input type="date" id="ecard-opening-date-${c.id}" value="${c.openingBalanceDate||todayStr()}">
           <div class="row-flex" style="margin-top:14px;">
             <button class="btn" style="margin-top:0;" data-save-card="${c.id}">Save</button>
             <button class="btn secondary" style="margin-top:0;" data-cancel-card>Cancel</button>
@@ -1406,7 +1424,7 @@ function settingsSectionCards(){
         <div class="list-row">
           <div>
             <div class="n">${escapeHtml(c.name)}</div>
-            <div class="m">Closes on the ${c.closingDay||15}${c.creditLimit?` \u00b7 limit ${fmtMoney(c.creditLimit)}`:''}</div>
+            <div class="m">Closes on the ${c.closingDay||15}${c.creditLimit?` \u00b7 limit ${fmtMoney(c.creditLimit)}`:''} \u00b7 balance ${fmtMoney(cardBalance(c))}</div>
           </div>
           <div class="row-actions">
             <button class="x-btn" data-edit-card="${c.id}" style="color:var(--ink-dim);">&#9998;</button>
@@ -1420,6 +1438,11 @@ function settingsSectionCards(){
         <input type="number" id="nc-closing" class="mono" min="1" max="28" value="15">
         <label for="nc-limit">Credit limit (optional)</label>
         <input type="number" id="nc-limit" class="mono" step="0.01" min="0" placeholder="e.g. 10000">
+        <label for="nc-opening">Opening balance (AUD)</label>
+        <input type="number" id="nc-opening" class="mono" step="0.01" placeholder="0.00">
+        <div class="helptext">If the card already has a balance from before you started tracking it here, enter it — otherwise leave at 0.</div>
+        <label for="nc-opening-date">As of date</label>
+        <input type="date" id="nc-opening-date" value="${todayStr()}">
         <button class="btn secondary" id="add-card-btn" style="margin-top:14px;">Add card</button>
       </div>
     </div>
@@ -2107,10 +2130,12 @@ function attachHandlers(){
       }
       const closingDay = parseInt(document.getElementById('nc-closing').value, 10) || 15;
       const limitRaw = document.getElementById('nc-limit').value;
+      const openingRaw = document.getElementById('nc-opening').value;
+      const openingDate = document.getElementById('nc-opening-date').value;
       const addCardBtn = document.getElementById('add-card-btn');
       addCardBtn.disabled = true; const origText = addCardBtn.textContent; addCardBtn.textContent = 'Adding…';
       try{
-        const data = await apiPost('addCard', { data: { name, closingDay, creditLimit: limitRaw==='' ? null : parseFloat(limitRaw) } });
+        const data = await apiPost('addCard', { data: { name, closingDay, creditLimit: limitRaw==='' ? null : parseFloat(limitRaw), openingBalance: openingRaw===''?0:parseFloat(openingRaw), openingBalanceDate: openingDate } });
         applyData(data);
         showToast('Card added');
         render();
@@ -2128,10 +2153,12 @@ function attachHandlers(){
         const name = document.getElementById(`ecard-name-${id}`).value.trim();
         const closingDay = parseInt(document.getElementById(`ecard-closing-${id}`).value, 10) || 15;
         const limitRaw = document.getElementById(`ecard-limit-${id}`).value;
+        const openingRaw = document.getElementById(`ecard-opening-${id}`).value;
+        const openingDate = document.getElementById(`ecard-opening-date-${id}`).value;
         if(!name) return;
         btn.disabled = true; btn.textContent = 'Saving…';
         try{
-          const data = await apiPost('updateCard', { data: { id, name, closingDay, creditLimit: limitRaw==='' ? null : parseFloat(limitRaw) } });
+          const data = await apiPost('updateCard', { data: { id, name, closingDay, creditLimit: limitRaw==='' ? null : parseFloat(limitRaw), openingBalance: openingRaw===''?0:parseFloat(openingRaw), openingBalanceDate: openingDate } });
           applyData(data);
           editingCardId = null;
           showToast('Card updated');
