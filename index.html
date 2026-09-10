@@ -306,14 +306,18 @@ function getCards(){ return state.settings.cards || []; }
 function findCard(name){ return getCards().find(c=>c.name===name); }
 function isCardMethod(name){ return !!findCard(name); }
 // Running balance owed on the card: opening balance plus every charge
-// (positive) and payment (negative — e.g. a Transfer money payoff) since
-// the opening date. Mirrors accountBalance()'s formula but adds instead of
-// subtracting, since a charge increases what's owed rather than decreasing
-// a pool of money.
+// (positive) and payment (negative — e.g. a Transfer money payoff) that's
+// actually happened so far (date <= today) since the opening date. Mirrors
+// accountBalance()'s formula but adds instead of subtracting, since a
+// charge increases what's owed rather than decreasing a pool of money.
+// Future-dated Afterpay installments are excluded here for the same
+// reason the "current statement" figure excludes them — they haven't
+// actually charged yet.
 function cardBalance(c){
   const openingDate = c.openingBalanceDate || '1970-01-01';
+  const today = todayStr();
   const activity = state.transactions
-    .filter(t => t.date >= openingDate && t.paymentMethod === c.name)
+    .filter(t => t.date >= openingDate && t.date <= today && t.paymentMethod === c.name)
     .reduce((sum,t) => sum + t.amount, 0);
   return Number(c.openingBalance||0) + activity;
 }
@@ -1412,8 +1416,9 @@ function settingsSectionCards(){
           <input type="number" id="ecard-closing-${c.id}" class="mono" min="1" max="28" value="${c.closingDay||15}">
           <label for="ecard-limit-${c.id}">Credit limit (optional)</label>
           <input type="number" id="ecard-limit-${c.id}" class="mono" step="0.01" min="0" placeholder="e.g. 10000" value="${c.creditLimit!==null && c.creditLimit!==undefined ? c.creditLimit : ''}">
-          <label for="ecard-opening-${c.id}">Opening balance (AUD)</label>
+          <label for="ecard-opening-${c.id}">Balance owed as of the date below (AUD)</label>
           <input type="number" id="ecard-opening-${c.id}" class="mono" step="0.01" value="${Number(c.openingBalance||0)}">
+          <div class="helptext">Not the "opening balance" printed on a statement — that's the start of one cycle. Use the actual amount owed on this date (a statement's "closing balance" if you're matching it to one).</div>
           <label for="ecard-opening-date-${c.id}">As of date</label>
           <input type="date" id="ecard-opening-date-${c.id}" value="${c.openingBalanceDate||todayStr()}">
           <div class="row-flex" style="margin-top:14px;">
@@ -1438,9 +1443,9 @@ function settingsSectionCards(){
         <input type="number" id="nc-closing" class="mono" min="1" max="28" value="15">
         <label for="nc-limit">Credit limit (optional)</label>
         <input type="number" id="nc-limit" class="mono" step="0.01" min="0" placeholder="e.g. 10000">
-        <label for="nc-opening">Opening balance (AUD)</label>
+        <label for="nc-opening">Balance owed as of the date below (AUD)</label>
         <input type="number" id="nc-opening" class="mono" step="0.01" placeholder="0.00">
-        <div class="helptext">If the card already has a balance from before you started tracking it here, enter it — otherwise leave at 0.</div>
+        <div class="helptext">Not the "opening balance" printed on a statement — that's the start of one cycle. Enter the actual amount owed on this date (leave at 0 if the card starts fresh). A statement's "closing balance" is usually the right figure to use if you're matching it to one.</div>
         <label for="nc-opening-date">As of date</label>
         <input type="date" id="nc-opening-date" value="${todayStr()}">
         <button class="btn secondary" id="add-card-btn" style="margin-top:14px;">Add card</button>
