@@ -289,6 +289,7 @@ let editingMethod = null;
 let editingCardId = null;
 let editingAccountId = null;
 let editingGiftCardId = null;
+let rechargingGiftCardId = null;
 let editingScheduleId = null;
 let logFilterMethod = '';
 let logFilterCategory = '';
@@ -370,8 +371,8 @@ function giftCardFundingOptions(){
 // from the Dashboard's spend widgets since nothing was actually spent.
 function getNonMonetarySources(){ return state.settings.nonMonetarySources || []; }
 function isNonMonetarySource(name){ return getNonMonetarySources().includes(name); }
-function giftCardFundingOptionsHtml(selected){
-  const monetary = giftCardFundingOptions();
+function giftCardFundingOptionsHtml(selected, excludeName){
+  const monetary = giftCardFundingOptions().filter(m => m !== excludeName);
   const nonMonetary = getNonMonetarySources();
   let html = `<optgroup label="Monetary">${monetary.map(m=>`<option value="${escapeHtml(m)}"${m===selected?' selected':''}>${escapeHtml(m)}</option>`).join('')}</optgroup>`;
   if(nonMonetary.length){
@@ -384,6 +385,19 @@ function giftCardFundingOptionsHtml(selected){
 // just aren't offered as something to hand-pick for an ordinary purchase.
 function manualCategoryOptions(){
   return (state.settings.categories||[]).filter(c => !SYSTEM_CATEGORIES.includes(c));
+}
+// Categories are tagged 'expense', 'income', or 'both' at creation time so
+// the Add form can show only what's relevant once Expense/Income is picked.
+// Anything untagged (created before this existed) defaults to 'expense' —
+// the same category list everyone already had kept working exactly as before.
+function getCategoryType(catName){
+  return (state.settings.categoryTypes||{})[catName] || 'expense';
+}
+function categoryOptionsForType(type){
+  return manualCategoryOptions().filter(c => {
+    const ct = getCategoryType(c);
+    return ct === type || ct === 'both';
+  });
 }
 async function ensureCategoryExists(catName){
   if((state.settings.categories||[]).includes(catName)) return;
@@ -939,6 +953,7 @@ function viewAdd(){
   const cards = getCards();
   const merchantOptions = state.merchants.map(m=>`<option value="${escapeHtml(m.name)}">`).join('');
   const defaultMethod = methods[0];
+  const firstExpenseCat = cats.find(c=>getCategoryType(c)==='expense'||getCategoryType(c)==='both') || cats[0];
   return `
     <div class="card">
       <div class="card-title">New transaction</div>
@@ -947,44 +962,56 @@ function viewAdd(){
         <input type="date" id="f-date" value="${todayStr()}" required>
         <div class="field-error-msg" id="f-date-error"></div>
 
-        <label for="f-vendor">Vendor</label>
-        <input type="text" id="f-vendor" list="merchant-list" placeholder="e.g. Bunnings, Officeworks" autocomplete="off" required>
-        <datalist id="merchant-list">${merchantOptions}</datalist>
-        <div class="helptext">Type a new vendor and it'll be saved to your merchant list automatically.</div>
-        <div class="field-error-msg" id="f-vendor-error"></div>
+        <label>Type</label>
+        <div class="pill-group" id="f-type-group">
+          <div class="pill active" data-value="expense">Expense</div>
+          <div class="pill" data-value="income">Income</div>
+          <div class="pill" data-value="transfer">Transfer</div>
+        </div>
 
         <label for="f-amount">Amount (AUD)</label>
         <input type="number" id="f-amount" class="mono" step="0.01" min="0" placeholder="0.00" required>
         <div class="field-error-msg" id="f-amount-error"></div>
 
-        <label>Type</label>
-        <div class="pill-group" id="f-type-group">
-          <div class="pill active" data-value="expense">Expense</div>
-          <div class="pill" data-value="income">Income</div>
+        <div id="normal-fields-section">
+          <label for="f-vendor">Vendor</label>
+          <input type="text" id="f-vendor" list="merchant-list" placeholder="e.g. Bunnings, Officeworks" autocomplete="off" required>
+          <datalist id="merchant-list">${merchantOptions}</datalist>
+          <div class="helptext">Type a new vendor and it'll be saved to your merchant list automatically.</div>
+          <div class="field-error-msg" id="f-vendor-error"></div>
+
+          <label>Method of payment</label>
+          <div class="pill-group" id="f-method-group">
+            ${methods.map((m,i)=>`<div class="pill${i===0?' active':''}" data-value="${escapeHtml(m)}">${escapeHtml(m)}</div>`).join('')}
+          </div>
+
+          <div id="afterpay-section" style="display:${defaultMethod==='Afterpay'?'block':'none'};">
+            ${cards.length ? `
+              <label for="f-afterpay-card">Charge installments to</label>
+              <select id="f-afterpay-card">${cards.map(c=>`<option value="${escapeHtml(c.name)}">${escapeHtml(c.name)}</option>`).join('')}</select>
+              <label for="f-afterpay-first-date">First installment date</label>
+              <input type="date" id="f-afterpay-first-date" value="${todayStr()}">
+              <div class="helptext">Splits into 4 equal payments, two weeks apart from this date, charged to the card above — each one lands in that card's own statement and reconciliation. Doesn't need to match the purchase date above if Afterpay's first debit lands on a different day.</div>
+            ` : `<div class="helptext" style="color:var(--pending);">Add a credit card in Settings first — Afterpay installments need one to charge to.</div>`}
+          </div>
+
+          <label>Category</label>
+          <div class="pill-group" id="f-category-group">
+            ${cats.map(c=>`<div class="pill${c===firstExpenseCat?' active':''}" data-value="${escapeHtml(c)}" data-cat-type="${getCategoryType(c)}" style="display:${(getCategoryType(c)==='expense'||getCategoryType(c)==='both')?'':'none'};">${escapeHtml(c)}</div>`).join('')}
+          </div>
+          <div class="field-error-msg" id="f-category-error"></div>
         </div>
 
-        <label>Method of payment</label>
-        <div class="pill-group" id="f-method-group">
-          ${methods.map((m,i)=>`<div class="pill${i===0?' active':''}" data-value="${escapeHtml(m)}">${escapeHtml(m)}</div>`).join('')}
-        </div>
-
-        <div id="afterpay-section" style="display:${defaultMethod==='Afterpay'?'block':'none'};">
-          ${cards.length ? `
-            <label for="f-afterpay-card">Charge installments to</label>
-            <select id="f-afterpay-card">${cards.map(c=>`<option value="${escapeHtml(c.name)}">${escapeHtml(c.name)}</option>`).join('')}</select>
-            <label for="f-afterpay-first-date">First installment date</label>
-            <input type="date" id="f-afterpay-first-date" value="${todayStr()}">
-            <div class="helptext">Splits into 4 equal payments, two weeks apart from this date, charged to the card above — each one lands in that card's own statement and reconciliation. Doesn't need to match the purchase date above if Afterpay's first debit lands on a different day.</div>
-          ` : `<div class="helptext" style="color:var(--pending);">Add a credit card in Settings first — Afterpay installments need one to charge to.</div>`}
-        </div>
-
-        <label>Category of goods / services</label>
-        <div class="pill-group" id="f-category-group">
-          ${cats.map((c,i)=>`<div class="pill${i===0?' active':''}" data-value="${escapeHtml(c)}">${escapeHtml(c)}</div>`).join('')}
+        <div id="transfer-fields-section" style="display:none;">
+          <label for="f-transfer-from">From</label>
+          <select id="f-transfer-from">${transferMethodOptions().map(m=>`<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join('')}</select>
+          <label for="f-transfer-to">To</label>
+          <select id="f-transfer-to">${transferMethodOptions().map(m=>`<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join('')}</select>
+          <div class="helptext">Moves money between accounts and cash without it counting as spend. Only sides that actually track a balance get a record; Cash, Debit Card, and Bank Transfer have no ledger of their own.</div>
         </div>
 
         <label for="f-notes">Notes (optional)</label>
-        <textarea id="f-notes" rows="2" placeholder="Anything worth remembering about this purchase"></textarea>
+        <textarea id="f-notes" rows="2" placeholder="Anything worth remembering"></textarea>
 
         <button type="submit" class="btn" id="add-submit-btn">Save transaction</button>
       </form>
@@ -1305,7 +1332,6 @@ function viewSettings(){
 
 const SETTINGS_MENU = [
   { key:'accounts', icon:'\ud83c\udfe6', title:'Bank accounts', subtitle: () => `${getAccounts().length} account${getAccounts().length===1?'':'s'} \u00b7 balances & running totals`, render: settingsSectionAccounts },
-  { key:'transfer', icon:'\ud83d\udd01', title:'Transfer money', subtitle: () => 'Move money between methods without it counting as spend', render: settingsSectionTransfer },
   { key:'cards', icon:'\ud83d\udcb3', title:'Credit cards', subtitle: () => `${getCards().length} card${getCards().length===1?'':'s'} \u00b7 closing dates & limits`, render: settingsSectionCards },
   { key:'giftcards', icon:'\ud83c\udf81', title:'Gift cards', subtitle: () => `${getGiftCards().length} gift card${getGiftCards().length===1?'':'s'} tracked`, render: settingsSectionGiftCards },
   { key:'nonmonetary', icon:'\ud83c\udf9f\ufe0f', title:'Non-monetary sources', subtitle: () => `${getNonMonetarySources().length} source${getNonMonetarySources().length===1?'':'s'} \u00b7 points, promos, free gift cards`, render: settingsSectionNonMonetary },
@@ -1383,26 +1409,6 @@ function settingsSectionAccounts(){
   `;
 }
 
-function settingsSectionTransfer(){
-  return `
-    <div class="card">
-      <div class="card-title">Transfer money</div>
-      <div class="helptext" style="margin-bottom:10px;">Move money between accounts and cash without it counting as spend — filed under "${TRANSFER_CATEGORY}". Only sides that actually track a balance get a record; Cash, Debit Card, and Bank Transfer have no ledger of their own.</div>
-      <label for="tr-from">From</label>
-      <select id="tr-from">${transferMethodOptions().map(m=>`<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join('')}</select>
-      <label for="tr-to">To</label>
-      <select id="tr-to">${transferMethodOptions().map(m=>`<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join('')}</select>
-      <label for="tr-amount">Amount (AUD)</label>
-      <input type="number" id="tr-amount" class="mono" step="0.01" min="0" placeholder="0.00">
-      <label for="tr-date">Date</label>
-      <input type="date" id="tr-date" value="${todayStr()}">
-      <label for="tr-notes">Notes (optional)</label>
-      <textarea id="tr-notes" rows="2" placeholder="What this transfer was for"></textarea>
-      <button class="btn secondary" id="do-transfer-btn" style="margin-top:14px;">Transfer</button>
-    </div>
-  `;
-}
-
 function settingsSectionCards(){
   return `
     <div class="card">
@@ -1475,6 +1481,20 @@ function settingsSectionGiftCards(){
             <button class="btn" style="margin-top:0;" data-save-giftcard="${g.id}">Save</button>
             <button class="btn secondary" style="margin-top:0;" data-cancel-giftcard>Cancel</button>
           </div>
+        </div>` : g.id===rechargingGiftCardId ? `
+        <div class="list-row" style="display:block;padding-bottom:14px;">
+          <div class="n" style="margin-bottom:10px;">Recharge ${escapeHtml(g.name)} \u2014 currently ${fmtMoney(giftCardBalance(g))}</div>
+          <label for="rgc-amount-${g.id}">Amount to add (AUD)</label>
+          <input type="number" id="rgc-amount-${g.id}" class="mono" step="0.01" min="0" placeholder="0.00">
+          <label for="rgc-date-${g.id}">Date</label>
+          <input type="date" id="rgc-date-${g.id}" value="${todayStr()}">
+          <label for="rgc-source-${g.id}">Funding source</label>
+          <select id="rgc-source-${g.id}">${giftCardFundingOptionsHtml(null, g.name)}</select>
+          <div class="helptext">Charges the funding source and adds straight to this gift card's balance \u2014 doesn't count as spend, same as the original load.</div>
+          <div class="row-flex" style="margin-top:14px;">
+            <button class="btn" style="margin-top:0;" data-confirm-recharge="${g.id}">Recharge</button>
+            <button class="btn secondary" style="margin-top:0;" data-cancel-recharge>Cancel</button>
+          </div>
         </div>` : `
         <div class="list-row">
           <div>
@@ -1482,6 +1502,7 @@ function settingsSectionGiftCards(){
             <div class="m">Loaded ${fmtMoney(g.loadedAmount)} via ${escapeHtml(g.cardName)} on ${fmtDate(g.loadedDate)} \u00b7 ${fmtMoney(giftCardBalance(g))} remaining</div>
           </div>
           <div class="row-actions">
+            <button class="x-btn" data-recharge-giftcard="${g.id}" style="color:var(--accent);font-size:15px;">&#8635;</button>
             <button class="x-btn" data-edit-giftcard="${g.id}" style="color:var(--ink-dim);">&#9998;</button>
             <button class="x-btn" data-remove-giftcard="${g.id}">&times;</button>
           </div>
@@ -1580,28 +1601,44 @@ function settingsSectionMerchants(){
 
 function settingsSectionCategories(){
   const s = state.settings;
+  const typeLabel = t => t==='income' ? 'Income' : t==='both' ? 'Expense & Income' : 'Expense';
   return `
     <div class="card">
       <div class="card-title">Categories</div>
-      <div class="helptext" style="margin-bottom:10px;">Categories marked "system" can be deleted (with a warning) but not renamed — Afterpay, Transfers, and Gift Cards rely on their exact name internally, and a rename would silently break how they're tracked.</div>
+      <div class="helptext" style="margin-bottom:10px;">Categories marked "system" can be deleted (with a warning) but not renamed — Afterpay, Transfers, and Gift Cards rely on their exact name internally, and a rename would silently break how they're tracked. Tag each category as Expense or Income so the Add form only shows relevant ones once you've picked a type.</div>
       ${(s.categories||[]).map(c=> c===editingCategory ? `
         <div class="list-row" style="display:block;padding-bottom:14px;">
           <input type="text" id="ec-input" value="${escapeHtml(c)}">
+          ${!SYSTEM_CATEGORIES.includes(c) ? `
+            <label style="margin-top:10px;">Applies to</label>
+            <div class="pill-group" id="ec-type-group">
+              <div class="pill${getCategoryType(c)==='expense'?' active':''}" data-value="expense">Expense</div>
+              <div class="pill${getCategoryType(c)==='income'?' active':''}" data-value="income">Income</div>
+              <div class="pill${getCategoryType(c)==='both'?' active':''}" data-value="both">Both</div>
+            </div>
+          ` : ''}
           <div class="row-flex" style="margin-top:10px;">
             <button class="btn" style="margin-top:0;" data-save-category="${escapeHtml(c)}">Save</button>
             <button class="btn secondary" style="margin-top:0;" data-cancel-category>Cancel</button>
           </div>
         </div>` : `
         <div class="list-row">
-          <div class="n">${escapeHtml(c)}${SYSTEM_CATEGORIES.includes(c) ? ' <span class="tag" style="margin-left:4px;">system</span>' : ''}</div>
+          <div class="n">${escapeHtml(c)}${SYSTEM_CATEGORIES.includes(c) ? ' <span class="tag" style="margin-left:4px;">system</span>' : ` <span class="tag" style="margin-left:4px;">${typeLabel(getCategoryType(c))}</span>`}</div>
           <div class="row-actions">
             ${SYSTEM_CATEGORIES.includes(c) ? '' : `<button class="x-btn" data-edit-category="${escapeHtml(c)}" style="color:var(--ink-dim);">&#9998;</button>`}
             <button class="x-btn" data-remove-category="${escapeHtml(c)}">&times;</button>
           </div>
         </div>`).join('')}
-      <div class="chip-add">
-        <input type="text" id="new-category-input" placeholder="New category">
-        <button id="add-category-btn">Add</button>
+      <div style="margin-top:14px;">
+        <label for="new-category-input">New category</label>
+        <input type="text" id="new-category-input" placeholder="e.g. Office Supplies">
+        <label>Applies to</label>
+        <div class="pill-group" id="new-category-type-group">
+          <div class="pill active" data-value="expense">Expense</div>
+          <div class="pill" data-value="income">Income</div>
+          <div class="pill" data-value="both">Both</div>
+        </div>
+        <button class="btn secondary" id="add-category-btn" style="margin-top:14px;">Add category</button>
       </div>
     </div>
   `;
@@ -1780,6 +1817,25 @@ function attachHandlers(){
       p.addEventListener('click', ()=>{
         document.querySelectorAll('#f-type-group .pill').forEach(x=>x.classList.remove('active'));
         p.classList.add('active');
+        const isTransfer = p.dataset.value === 'transfer';
+        const normalSection = document.getElementById('normal-fields-section');
+        const transferSection = document.getElementById('transfer-fields-section');
+        if(normalSection) normalSection.style.display = isTransfer ? 'none' : 'block';
+        if(transferSection) transferSection.style.display = isTransfer ? 'block' : 'none';
+        if(!isTransfer){
+          // Show only the categories tagged for this type (or "both").
+          document.querySelectorAll('#f-category-group .pill').forEach(cp=>{
+            const ct = cp.dataset.catType;
+            const show = ct === p.dataset.value || ct === 'both';
+            cp.style.display = show ? '' : 'none';
+          });
+          const activeCat = document.querySelector('#f-category-group .pill.active');
+          if(!activeCat || activeCat.style.display === 'none'){
+            document.querySelectorAll('#f-category-group .pill').forEach(x=>x.classList.remove('active'));
+            const firstVisible = Array.from(document.querySelectorAll('#f-category-group .pill')).find(cp=>cp.style.display !== 'none');
+            if(firstVisible) firstVisible.classList.add('active');
+          }
+        }
       });
     });
     document.querySelectorAll('#f-method-group .pill').forEach(p=>{
@@ -1816,6 +1872,50 @@ function attachHandlers(){
       const method = document.querySelector('#f-method-group .pill.active')?.dataset.value || allPaymentMethodOptions()[0];
       const category = document.querySelector('#f-category-group .pill.active')?.dataset.value || (state.settings.categories||[])[0];
       const notes = document.getElementById('f-notes').value.trim();
+      const selectedType = document.querySelector('#f-type-group .pill.active')?.dataset.value || 'expense';
+
+      if(selectedType === 'transfer'){
+        const from = document.getElementById('f-transfer-from')?.value;
+        const to = document.getElementById('f-transfer-to')?.value;
+        if(!date){
+          document.getElementById('f-date').classList.add('field-error');
+          document.getElementById('f-date-error').textContent = 'Date is required.';
+          document.getElementById('f-date').focus();
+          return;
+        }
+        if(isNaN(rawAmount) || rawAmount <= 0){
+          document.getElementById('f-amount').classList.add('field-error');
+          document.getElementById('f-amount-error').textContent = 'Enter an amount greater than zero.';
+          showToast('Please fill in the highlighted field', true);
+          document.getElementById('f-amount').focus();
+          return;
+        }
+        if(!from || !to || from === to){
+          showToast('Pick two different sides to transfer between', true);
+          return;
+        }
+        const btn = document.getElementById('add-submit-btn');
+        btn.disabled = true; btn.textContent = 'Saving…';
+        try{
+          await ensureCategoryExists(TRANSFER_CATEGORY);
+          const txns = [];
+          if(hasLedger(from)) txns.push({ date, vendor: `Transfer to ${to}`, amount: Math.abs(rawAmount), paymentMethod: from, category: TRANSFER_CATEGORY, notes, reconciled:false });
+          if(hasLedger(to)) txns.push({ date, vendor: `Transfer from ${from}`, amount: -Math.abs(rawAmount), paymentMethod: to, category: TRANSFER_CATEGORY, notes, reconciled:false });
+          if(txns.length){
+            const data = await apiPost('addTransactions', { data: txns });
+            mergeAddTransactions(txns, data.ids);
+            showToast('Transfer recorded');
+          } else {
+            showToast('Nothing to record \u2014 neither side tracks a balance');
+          }
+          setView('log');
+        }catch(err){
+          setSync('bad');
+          showToast('Could not save — check your connection', true);
+          btn.disabled = false; btn.textContent = 'Save transaction';
+        }
+        return;
+      }
 
       // Clear any previous error state before re-checking.
       ['f-date','f-vendor','f-amount'].forEach(id=>{
@@ -2039,40 +2139,6 @@ function attachHandlers(){
       settingsSubView = null;
       render();
     });
-    document.getElementById('do-transfer-btn')?.addEventListener('click', async ()=>{
-      const from = document.getElementById('tr-from').value;
-      const to = document.getElementById('tr-to').value;
-      const amount = parseFloat(document.getElementById('tr-amount').value);
-      const date = document.getElementById('tr-date').value;
-      const notes = document.getElementById('tr-notes').value.trim();
-      if(!from || !to || from === to){ showToast('Pick two different sides to transfer between', true); return; }
-      if(isNaN(amount) || amount <= 0){ showToast('Enter a valid amount', true); return; }
-      const btn = document.getElementById('do-transfer-btn');
-      btn.disabled = true; btn.textContent = 'Transferring…';
-      try{
-        await ensureCategoryExists(TRANSFER_CATEGORY);
-        const txns = [];
-        if(hasLedger(from)){
-          txns.push({ date, vendor: `Transfer to ${to}`, amount, paymentMethod: from, category: TRANSFER_CATEGORY, notes, reconciled:false });
-        }
-        if(hasLedger(to)){
-          txns.push({ date, vendor: `Transfer from ${from}`, amount: -amount, paymentMethod: to, category: TRANSFER_CATEGORY, notes, reconciled:false });
-        }
-        if(txns.length){
-          const data = await apiPost('addTransactions', { data: txns });
-          mergeAddTransactions(txns, data.ids);
-          showToast('Transfer recorded');
-        } else {
-          showToast('Nothing to record \u2014 neither side tracks a balance');
-        }
-        render();
-      }catch(err){
-        setSync('bad');
-        showToast('Could not save', true);
-      } finally {
-        btn.disabled = false; btn.textContent = 'Transfer';
-      }
-    });
 
     document.getElementById('add-account-btn')?.addEventListener('click', async ()=>{
       const name = document.getElementById('na-name').value.trim();
@@ -2212,6 +2278,38 @@ function attachHandlers(){
     document.querySelectorAll('[data-cancel-giftcard]').forEach(btn=>{
       btn.addEventListener('click', ()=>{ editingGiftCardId = null; render(); });
     });
+    document.querySelectorAll('[data-recharge-giftcard]').forEach(btn=>{
+      btn.addEventListener('click', ()=>{ rechargingGiftCardId = btn.dataset.rechargeGiftcard; render(); });
+    });
+    document.querySelectorAll('[data-cancel-recharge]').forEach(btn=>{
+      btn.addEventListener('click', ()=>{ rechargingGiftCardId = null; render(); });
+    });
+    document.querySelectorAll('[data-confirm-recharge]').forEach(btn=>{
+      btn.addEventListener('click', async ()=>{
+        const id = btn.dataset.confirmRecharge;
+        const g = getGiftCards().find(x=>x.id===id);
+        if(!g) return;
+        const amount = parseFloat(document.getElementById(`rgc-amount-${id}`).value);
+        const date = document.getElementById(`rgc-date-${id}`).value;
+        const source = document.getElementById(`rgc-source-${id}`).value;
+        if(isNaN(amount) || amount <= 0){ showToast('Enter a valid amount', true); return; }
+        btn.disabled = true; const origText = btn.textContent; btn.textContent = 'Recharging…';
+        try{
+          await ensureCategoryExists(GIFT_CARD_LOAD_CATEGORY);
+          const txns = [];
+          if(hasLedger(source)) txns.push({ date, vendor: `Recharge ${g.name}`, amount, paymentMethod: source, category: GIFT_CARD_LOAD_CATEGORY, notes: '', reconciled:false });
+          txns.push({ date, vendor: `Recharge ${g.name}`, amount: -amount, paymentMethod: g.name, category: GIFT_CARD_LOAD_CATEGORY, notes: '', reconciled:false });
+          const data = await apiPost('addTransactions', { data: txns });
+          mergeAddTransactions(txns, data.ids);
+          rechargingGiftCardId = null;
+          showToast('Gift card recharged');
+          render();
+        }catch(err){
+          setSync('bad'); showToast('Could not save', true);
+          btn.disabled = false; btn.textContent = origText;
+        }
+      });
+    });
     document.querySelectorAll('[data-save-giftcard]').forEach(btn=>{
       btn.addEventListener('click', async ()=>{
         const id = btn.dataset.saveGiftcard;
@@ -2349,14 +2447,22 @@ function attachHandlers(){
       });
     });
 
+    document.querySelectorAll('#new-category-type-group .pill').forEach(p=>{
+      p.addEventListener('click', ()=>{
+        document.querySelectorAll('#new-category-type-group .pill').forEach(x=>x.classList.remove('active'));
+        p.classList.add('active');
+      });
+    });
     document.getElementById('add-category-btn')?.addEventListener('click', async ()=>{
       const v = document.getElementById('new-category-input').value.trim();
       if(!v || (state.settings.categories||[]).includes(v)) return;
+      const type = document.querySelector('#new-category-type-group .pill.active')?.dataset.value || 'expense';
       const categories = [...(state.settings.categories||[]), v];
+      const categoryTypes = { ...(state.settings.categoryTypes||{}), [v]: type };
       const addCategoryBtn = document.getElementById('add-category-btn');
       addCategoryBtn.disabled = true; const origText = addCategoryBtn.textContent; addCategoryBtn.textContent = 'Adding…';
       try{
-        const data = await apiPost('saveSettings', { data: { categories } });
+        const data = await apiPost('saveSettings', { data: { categories, categoryTypes } });
         applyData(data);
         render();
       }catch(err){ setSync('bad'); showToast('Could not save', true); addCategoryBtn.disabled = false; addCategoryBtn.textContent = origText; }
@@ -2384,18 +2490,35 @@ function attachHandlers(){
     document.querySelectorAll('[data-cancel-category]').forEach(btn=>{
       btn.addEventListener('click', ()=>{ editingCategory = null; render(); });
     });
+    document.querySelectorAll('#ec-type-group .pill').forEach(p=>{
+      p.addEventListener('click', ()=>{
+        document.querySelectorAll('#ec-type-group .pill').forEach(x=>x.classList.remove('active'));
+        p.classList.add('active');
+      });
+    });
     document.querySelectorAll('[data-save-category]').forEach(btn=>{
       btn.addEventListener('click', async ()=>{
         const oldName = btn.dataset.saveCategory;
         const newName = document.getElementById('ec-input').value.trim();
         if(!newName){ return; }
-        if(newName === oldName){ editingCategory = null; render(); return; }
+        const typeGroup = document.getElementById('ec-type-group');
+        const type = typeGroup ? (typeGroup.querySelector('.pill.active')?.dataset.value || 'expense') : null;
         btn.disabled = true; btn.textContent = 'Saving…';
         try{
-          const data = await apiPost('renameCategory', { oldName, newName });
-          applyData(data);
+          let data;
+          if(newName !== oldName){
+            data = await apiPost('renameCategory', { oldName, newName });
+            applyData(data);
+          }
+          if(type){
+            const categoryTypes = { ...(state.settings.categoryTypes||{}) };
+            delete categoryTypes[oldName];
+            categoryTypes[newName] = type;
+            data = await apiPost('saveSettings', { data: { categoryTypes } });
+            applyData(data);
+          }
           editingCategory = null;
-          showToast('Category renamed');
+          showToast('Category updated');
           render();
         }catch(err){ setSync('bad'); showToast('Could not save', true); btn.disabled = false; btn.textContent = 'Save'; }
       });
