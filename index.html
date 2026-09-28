@@ -890,11 +890,11 @@ function viewDashboard(){
       ${dueSchedules.map(sc=>`
         <div class="list-row" style="display:block;">
           <div style="display:flex;justify-content:space-between;align-items:baseline;">
-            <div class="n">${escapeHtml(sc.vendor)}</div>
+            <div class="n">${escapeHtml(sc.vendor)}${sc.amount<0?' <span class="tag" style="color:var(--money);">Income</span>':''}</div>
             <div class="helptext">due ${fmtDate(sc.nextDue)} \u00b7 ${escapeHtml(sc.paymentMethod)}</div>
           </div>
           <div class="row-flex" style="margin-top:8px;">
-            <input type="number" class="mono due-confirm-amount" data-schedule-id="${sc.id}" step="0.01" min="0" value="${sc.amount}" style="flex:1;">
+            <input type="number" class="mono due-confirm-amount" data-schedule-id="${sc.id}" data-income="${sc.amount<0?'1':'0'}" step="0.01" min="0" value="${Math.abs(sc.amount)}" style="flex:1;">
             <button class="btn secondary" style="margin-top:0;width:auto;flex:0 0 auto;" data-confirm-schedule="${sc.id}">Confirm</button>
           </div>
         </div>`).join('')}
@@ -1678,13 +1678,18 @@ function settingsSectionSchedules(){
   return `
     <div class="card">
       <div class="card-title">Scheduled payments</div>
-      <div class="helptext" style="margin-bottom:10px;">"Auto-log" schedules record themselves on their due date, catching up on anything missed since you last opened the app. "Confirm each time" schedules wait instead — they show up as due on the Dashboard until you tap Confirm, so you get one-tap logging without re-typing the whole entry, and a chance to adjust the amount if it varies (a utility bill, say). For true background automation of auto-log schedules even when the app's closed, open <code>Code.gs</code> in the Apps Script editor, select <code>createDailyScheduleTrigger</code> in the function dropdown, and click Run once (one-time authorization).</div>
+      <div class="helptext" style="margin-bottom:10px;">"Auto-log" schedules record themselves on their due date, catching up on anything missed since you last opened the app. "Confirm each time" schedules wait instead — they show up as due on the Dashboard until you tap Confirm, so you get one-tap logging without re-typing the whole entry, and a chance to adjust the amount if it varies (a utility bill, say). Works for recurring income too — wages, interest, anything on a regular schedule. For true background automation of auto-log schedules even when the app's closed, open <code>Code.gs</code> in the Apps Script editor, select <code>createDailyScheduleTrigger</code> in the function dropdown, and click Run once (one-time authorization).</div>
       ${getSchedules().length ? getSchedules().map(sc=> sc.id===editingScheduleId ? `
         <div class="list-row" style="display:block;padding-bottom:14px;">
           <label for="esch-vendor-${sc.id}">Vendor</label>
           <input type="text" id="esch-vendor-${sc.id}" value="${escapeHtml(sc.vendor)}">
           <label for="esch-amount-${sc.id}">Amount (AUD)</label>
-          <input type="number" id="esch-amount-${sc.id}" class="mono" step="0.01" min="0" value="${sc.amount}">
+          <input type="number" id="esch-amount-${sc.id}" class="mono" step="0.01" min="0" value="${Math.abs(sc.amount)}">
+          <label>Type</label>
+          <div class="pill-group" id="esch-type-${sc.id}">
+            <div class="pill${sc.amount<0?'':' active'}" data-value="expense">Expense</div>
+            <div class="pill${sc.amount<0?' active':''}" data-value="income">Income</div>
+          </div>
           <label>Reminder type</label>
           <div class="pill-group" id="esch-autopost-${sc.id}">
             <div class="pill${sc.autoPost===false?'':' active'}" data-value="auto">Auto-log</div>
@@ -1711,7 +1716,7 @@ function settingsSectionSchedules(){
         </div>` : `
         <div class="list-row">
           <div>
-            <div class="n">${escapeHtml(sc.vendor)} \u00b7 ${fmtMoney(sc.amount)}</div>
+            <div class="n">${escapeHtml(sc.vendor)} \u00b7 <span style="${sc.amount<0?'color:var(--money);':''}">${sc.amount<0?'+':''}${fmtMoney(Math.abs(sc.amount))}</span>${sc.amount<0?' <span class="tag" style="color:var(--money);">Income</span>':''}</div>
             <div class="m">${frequencyLabel(sc.frequency)} \u00b7 ${escapeHtml(sc.paymentMethod)} \u00b7 next ${fmtDate(sc.nextDue)} \u00b7 ${sc.autoPost===false?'confirm each time':'auto-log'}</div>
           </div>
           <div class="row-actions">
@@ -1724,6 +1729,11 @@ function settingsSectionSchedules(){
         <input type="text" id="ns-vendor" placeholder="e.g. Xero subscription">
         <label for="ns-amount">Amount (AUD)</label>
         <input type="number" id="ns-amount" class="mono" step="0.01" min="0" placeholder="0.00">
+        <label>Type</label>
+        <div class="pill-group" id="ns-type-group">
+          <div class="pill active" data-value="expense">Expense</div>
+          <div class="pill" data-value="income">Income</div>
+        </div>
         <label>Reminder type</label>
         <div class="pill-group" id="ns-autopost-group">
           <div class="pill active" data-value="auto">Auto-log</div>
@@ -1790,7 +1800,9 @@ function attachHandlers(){
       btn.addEventListener('click', async ()=>{
         const id = btn.dataset.confirmSchedule;
         const amountInput = document.querySelector(`.due-confirm-amount[data-schedule-id="${id}"]`);
-        const amount = amountInput ? parseFloat(amountInput.value) : undefined;
+        const rawAmount = amountInput ? parseFloat(amountInput.value) : undefined;
+        const isIncome = amountInput?.dataset.income === '1';
+        const amount = rawAmount===undefined || isNaN(rawAmount) ? undefined : (isIncome ? -Math.abs(rawAmount) : Math.abs(rawAmount));
         btn.disabled = true; btn.textContent = 'Confirming…';
         try{
           const data = await apiPost('confirmSchedule', { id, amount });
@@ -1822,6 +1834,11 @@ function attachHandlers(){
         const transferSection = document.getElementById('transfer-fields-section');
         if(normalSection) normalSection.style.display = isTransfer ? 'none' : 'block';
         if(transferSection) transferSection.style.display = isTransfer ? 'block' : 'none';
+        // A hidden field with the native "required" attribute silently
+        // blocks the whole form's submit event before any JS runs — the
+        // browser tries to focus/validate a field it can't even show.
+        const vendorInput = document.getElementById('f-vendor');
+        if(vendorInput) vendorInput.required = !isTransfer;
         if(!isTransfer){
           // Show only the categories tagged for this type (or "both").
           document.querySelectorAll('#f-category-group .pill').forEach(cp=>{
@@ -2571,6 +2588,12 @@ function attachHandlers(){
       });
     });
 
+    document.querySelectorAll('#ns-type-group .pill').forEach(p=>{
+      p.addEventListener('click', ()=>{
+        document.querySelectorAll('#ns-type-group .pill').forEach(x=>x.classList.remove('active'));
+        p.classList.add('active');
+      });
+    });
     document.querySelectorAll('#ns-autopost-group .pill').forEach(p=>{
       p.addEventListener('click', ()=>{
         document.querySelectorAll('#ns-autopost-group .pill').forEach(x=>x.classList.remove('active'));
@@ -2579,13 +2602,14 @@ function attachHandlers(){
     });
     document.getElementById('add-schedule-btn')?.addEventListener('click', async ()=>{
       const vendor = document.getElementById('ns-vendor').value.trim();
-      const amount = parseFloat(document.getElementById('ns-amount').value);
-      if(!vendor || isNaN(amount)) return;
+      const rawAmount = parseFloat(document.getElementById('ns-amount').value);
+      if(!vendor || isNaN(rawAmount)) return;
+      const isIncome = document.querySelector('#ns-type-group .pill.active')?.dataset.value === 'income';
       const autoPost = document.querySelector('#ns-autopost-group .pill.active')?.dataset.value !== 'confirm';
       const schedule = {
         id: uid(),
         vendor,
-        amount,
+        amount: isIncome ? -Math.abs(rawAmount) : Math.abs(rawAmount),
         autoPost,
         paymentMethod: document.getElementById('ns-method').value,
         category: document.getElementById('ns-category').value,
@@ -2617,17 +2641,25 @@ function attachHandlers(){
         p.classList.add('active');
       });
     });
+    document.querySelectorAll('[id^="esch-type-"] .pill').forEach(p=>{
+      p.addEventListener('click', ()=>{
+        const group = p.parentElement;
+        group.querySelectorAll('.pill').forEach(x=>x.classList.remove('active'));
+        p.classList.add('active');
+      });
+    });
     document.querySelectorAll('[data-save-schedule]').forEach(btn=>{
       btn.addEventListener('click', async ()=>{
         const id = btn.dataset.saveSchedule;
         const vendor = document.getElementById(`esch-vendor-${id}`).value.trim();
-        const amount = parseFloat(document.getElementById(`esch-amount-${id}`).value);
-        if(!vendor || isNaN(amount)) return;
+        const rawAmount = parseFloat(document.getElementById(`esch-amount-${id}`).value);
+        if(!vendor || isNaN(rawAmount)) return;
+        const isIncome = document.querySelector(`#esch-type-${id} .pill.active`)?.dataset.value === 'income';
         const autoPost = document.querySelector(`#esch-autopost-${id} .pill.active`)?.dataset.value !== 'confirm';
         const schedules = getSchedules().map(sc => sc.id!==id ? sc : {
           ...sc,
           vendor,
-          amount,
+          amount: isIncome ? -Math.abs(rawAmount) : Math.abs(rawAmount),
           autoPost,
           paymentMethod: document.getElementById(`esch-method-${id}`).value,
           category: document.getElementById(`esch-category-${id}`).value,
