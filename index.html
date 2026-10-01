@@ -2850,17 +2850,6 @@ function renderSetupScreen(){
   });
 }
 
-/* ============ Keep date pickers on screen ============ */
-// The native date picker can render partly off-screen when the field sits
-// near the bottom of the visible area (common on smaller phones). Scrolling
-// the field toward the middle of the viewport before the picker opens gives
-// it room either way.
-document.addEventListener('focusin', (e)=>{
-  if(e.target && e.target.tagName === 'INPUT' && e.target.type === 'date'){
-    setTimeout(()=>{ e.target.scrollIntoView({ block: 'center', behavior: 'smooth' }); }, 60);
-  }
-});
-
 /* ============ PWA install (manifest + service worker) ============ */
 if('serviceWorker' in navigator){
   window.addEventListener('load', ()=>{
