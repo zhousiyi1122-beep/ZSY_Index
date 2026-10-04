@@ -113,6 +113,7 @@
   }
   input.mono,input[type=number],input[type=date]{font-family:'IBM Plex Mono',monospace;}
   input:focus,select:focus,textarea:focus{outline:2px solid var(--accent);outline-offset:0;border-color:transparent;}
+  input[type=date]::-webkit-calendar-picker-indicator{filter:invert(1);opacity:0.8;cursor:pointer;}
   .pill-group{display:flex;gap:8px;flex-wrap:wrap;margin-top:2px;}
   .menu-row{
     display:flex;align-items:center;gap:14px;padding:14px 4px;
@@ -838,7 +839,14 @@ function viewDashboard(){
   const cardSections = cards.map(c=>{
     const key = periodKeyFor(now, c.closingDay||15);
     const periodTxns = state.transactions.filter(t=>t.paymentMethod===c.name && periodKeyFor(t.date, c.closingDay||15)===key);
-    const spend = periodTxns.filter(t=>t.date<=now).reduce((s,t)=>s+t.amount,0);
+    const posted = periodTxns.filter(t=>t.date<=now);
+    // Shown as separate charges/credits rather than netted — a big payment
+    // landing in the same period as few new charges would otherwise net to
+    // a confusing negative "statement" figure that matches nothing on the
+    // real statement. Real statements show these as separate lines too.
+    const charges = posted.filter(t=>t.amount>0).reduce((s,t)=>s+t.amount,0);
+    const credits = posted.filter(t=>t.amount<0).reduce((s,t)=>s+Math.abs(t.amount),0);
+    const net = charges - credits;
     const upcoming = periodTxns.filter(t=>t.date>now).reduce((s,t)=>s+t.amount,0);
     const balance = cardBalance(c);
     const periodRec = ((state.settings.periods||{})[c.id]||{})[key];
@@ -852,8 +860,9 @@ function viewDashboard(){
             <div style="font-size:14px;font-weight:600;">${periodLabel(key)}</div>
             <div class="helptext" style="margin-top:4px;">Current statement \u00b7 closes ${fmtDate(key)}</div>
           </div>
-          <div class="mono" style="font-size:16px;font-weight:600;">${fmtMoney(spend)}</div>
+          <div class="mono" style="font-size:16px;font-weight:600;">${fmtMoney(net)}</div>
         </div>
+        <div class="helptext" style="margin-top:4px;">${fmtMoney(charges)} new charges${credits>0.001?` \u00b7 ${fmtMoney(credits)} new credits`:''}</div>
         ${upcoming > 0.001 ? `<div class="helptext" style="margin-top:8px;">${fmtMoney(upcoming)} more scheduled before this period closes (e.g. Afterpay installments) \u2014 not charged yet</div>` : ''}
         ${c.creditLimit ? `<div class="helptext" style="margin-top:8px;">${fmtMoney(c.creditLimit - balance)} of ${fmtMoney(c.creditLimit)} limit remaining</div>` : ''}
         ${periodRec && periodRec.closed ? `<div class="helptext" style="color:var(--money);margin-top:8px;">Reconciled against statement of ${fmtMoney(periodRec.actualTotal)}</div>` : ''}
@@ -1189,7 +1198,14 @@ function viewReconcile(){
 
     const periodsHtml = keys.map(key=>{
       const txns = periods[key].sort((a,b)=>a.date.localeCompare(b.date));
-      const total = txns.reduce((s,t)=>s+t.amount,0);
+      // Shown separately rather than netted — a big payment landing in the
+      // same period as few new charges would otherwise net to a confusing
+      // negative "total" that matches nothing on the real statement. Real
+      // statements show these as separate lines too (New Credits / New
+      // Debits), so this mirrors that instead of combining them.
+      const charges = txns.filter(t=>t.amount>0).reduce((s,t)=>s+t.amount,0);
+      const credits = txns.filter(t=>t.amount<0).reduce((s,t)=>s+Math.abs(t.amount),0);
+      const net = charges - credits;
       const recCount = txns.filter(t=>t.reconciled).length;
       const pr = ((state.settings.periods||{})[card.id]||{})[key];
       const closed = pr && pr.closed;
@@ -1201,7 +1217,8 @@ function viewReconcile(){
             <div class="title">${periodLabel(key)}</div>
             <div class="status-badge ${closed?'closed':'open'}">${closed?'closed':'open'}</div>
           </div>
-          <div class="helptext">${recCount}/${txns.length} matched \u2014 logged total ${fmtMoney(total)}</div>
+          <div class="helptext">${recCount}/${txns.length} matched</div>
+          <div class="helptext" style="margin-top:4px;">${fmtMoney(charges)} new charges${credits>0.001?` \u00b7 ${fmtMoney(credits)} new credits`:''} \u00b7 net ${fmtMoney(net)}</div>
           ${txns.map(t=>`
             <div class="recon-row">
               <input type="checkbox" class="recon-check" data-id="${t.id}" ${t.reconciled?'checked':''}>
