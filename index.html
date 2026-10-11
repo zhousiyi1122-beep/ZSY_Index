@@ -865,7 +865,7 @@ function viewDashboard(){
         <div class="helptext" style="margin-top:4px;">${fmtMoney(charges)} new charges${credits>0.001?` \u00b7 ${fmtMoney(credits)} new credits`:''}</div>
         ${upcoming > 0.001 ? `<div class="helptext" style="margin-top:8px;">${fmtMoney(upcoming)} more scheduled before this period closes (e.g. Afterpay installments) \u2014 not charged yet</div>` : ''}
         ${c.creditLimit ? `<div class="helptext" style="margin-top:8px;">${fmtMoney(c.creditLimit - balance)} of ${fmtMoney(c.creditLimit)} limit remaining</div>` : ''}
-        ${periodRec && periodRec.closed ? `<div class="helptext" style="color:var(--money);margin-top:8px;">Reconciled against statement of ${fmtMoney(periodRec.actualTotal)}</div>` : ''}
+        ${periodRec && periodRec.closed ? `<div class="helptext" style="color:var(--money);margin-top:8px;">Reconciled against statement \u2014 ${fmtMoney(periodRec.actualCharges!==undefined?periodRec.actualCharges:periodRec.actualTotal||0)} charges${periodRec.actualCredits?` \u00b7 ${fmtMoney(periodRec.actualCredits)} credits`:''}</div>` : ''}
       </div>`;
   }).join('');
 
@@ -1209,7 +1209,10 @@ function viewReconcile(){
       const recCount = txns.filter(t=>t.reconciled).length;
       const pr = ((state.settings.periods||{})[card.id]||{})[key];
       const closed = pr && pr.closed;
-      const actual = pr ? pr.actualTotal : null;
+      // Carries over an old single-field record (actualTotal) by treating
+      // it as the charges side, so nothing already saved just vanishes.
+      const actualCharges = pr ? (pr.actualCharges !== undefined ? pr.actualCharges : pr.actualTotal) : null;
+      const actualCredits = pr ? pr.actualCredits : null;
       const pid = card.id + '__' + key;
       return `
         <div class="period-card" data-card="${card.id}" data-period="${key}">
@@ -1228,9 +1231,13 @@ function viewReconcile(){
             </div>
           `).join('')}
           <div class="variance">
-            <label for="actual-${pid}" style="margin:0 0 6px;">Actual statement total</label>
-            <input type="number" step="0.01" class="mono actual-input" id="actual-${pid}" data-card="${card.id}" data-period="${key}" placeholder="Enter amount from statement" value="${actual!==null && actual!==undefined ? actual : ''}">
-            <div id="variance-${pid}" class="helptext" style="margin-top:8px;"></div>
+            <div class="helptext" style="margin-bottom:8px;">Enter your statement's own "New Debits" and "New Credits" figures here \u2014 matched separately against what's logged above, same as your statement shows them.</div>
+            <label for="actual-charges-${pid}" style="margin:0 0 6px;">Statement new charges / debits</label>
+            <input type="number" step="0.01" class="mono actual-input" id="actual-charges-${pid}" data-card="${card.id}" data-period="${key}" data-side="charges" placeholder="Enter amount from statement" value="${actualCharges!==null && actualCharges!==undefined ? actualCharges : ''}">
+            <div id="variance-charges-${pid}" class="helptext" style="margin-top:6px;"></div>
+            <label for="actual-credits-${pid}" style="margin:14px 0 6px;">Statement new credits</label>
+            <input type="number" step="0.01" class="mono actual-input" id="actual-credits-${pid}" data-card="${card.id}" data-period="${key}" data-side="credits" placeholder="0.00 if none" value="${actualCredits!==null && actualCredits!==undefined ? actualCredits : ''}">
+            <div id="variance-credits-${pid}" class="helptext" style="margin-top:6px;"></div>
             <div class="row-flex" style="margin-top:12px;">
               <button type="button" class="btn secondary close-period-btn" style="margin-top:0;" data-card="${card.id}" data-period="${key}">${closed?'Reopen period':'Mark statement reconciled'}</button>
               ${pr ? `<button type="button" class="btn secondary clear-period-btn" style="margin-top:0;" data-card="${card.id}" data-period="${key}">Clear record</button>` : ''}
@@ -1248,21 +1255,27 @@ function viewReconcile(){
 
 function updateVarianceDisplay(cardId, key){
   const pid = cardId + '__' + key;
-  const input = document.getElementById('actual-'+pid);
-  const disp = document.getElementById('variance-'+pid);
-  if(!input || !disp) return;
   const card = getCards().find(c=>c.id===cardId);
   const closingDay = card ? (card.closingDay||15) : 15;
   const txns = state.transactions.filter(t=>t.paymentMethod===(card?card.name:null) && periodKeyFor(t.date,closingDay)===key);
-  const total = txns.reduce((s,t)=>s+t.amount,0);
-  const actual = parseFloat(input.value);
-  if(isNaN(actual)){ disp.textContent=''; return; }
-  const diff = actual - total;
-  if(Math.abs(diff) < 0.01){
-    disp.innerHTML = `<span class="variance-ok">Matches \u2014 logged total agrees with statement.</span>`;
-  } else {
-    disp.innerHTML = `<span class="variance-bad">Variance of ${fmtMoney(Math.abs(diff))} \u2014 statement is ${diff>0?'higher':'lower'} than logged transactions.</span>`;
-  }
+  const loggedCharges = txns.filter(t=>t.amount>0).reduce((s,t)=>s+t.amount,0);
+  const loggedCredits = txns.filter(t=>t.amount<0).reduce((s,t)=>s+Math.abs(t.amount),0);
+
+  const checkSide = (side, logged, noun) => {
+    const input = document.getElementById(`actual-${side}-${pid}`);
+    const disp = document.getElementById(`variance-${side}-${pid}`);
+    if(!input || !disp) return;
+    const actual = parseFloat(input.value);
+    if(isNaN(actual)){ disp.textContent=''; return; }
+    const diff = actual - logged;
+    if(Math.abs(diff) < 0.01){
+      disp.innerHTML = `<span class="variance-ok">Matches \u2014 logged ${noun} agrees with statement.</span>`;
+    } else {
+      disp.innerHTML = `<span class="variance-bad">Variance of ${fmtMoney(Math.abs(diff))} \u2014 statement is ${diff>0?'higher':'lower'} than logged ${noun}.</span>`;
+    }
+  };
+  checkSide('charges', loggedCharges, 'charges');
+  checkSide('credits', loggedCredits, 'credits');
 }
 
 /* ============ Report ============ */
@@ -2124,12 +2137,18 @@ function attachHandlers(){
           const cardId = btn.dataset.card;
           const key = btn.dataset.period;
           const pid = cardId + '__' + key;
-          const input = document.getElementById('actual-'+pid);
-          const actual = input ? parseFloat(input.value) : NaN;
+          const chargesInput = document.getElementById(`actual-charges-${pid}`);
+          const creditsInput = document.getElementById(`actual-credits-${pid}`);
+          const actualCharges = chargesInput ? parseFloat(chargesInput.value) : NaN;
+          const actualCredits = creditsInput ? parseFloat(creditsInput.value) : NaN;
           const cardPeriods = (state.settings.periods||{})[cardId] || {};
           const isClosed = cardPeriods[key] && cardPeriods[key].closed;
           const periods = Object.assign({}, state.settings.periods);
-          periods[cardId] = Object.assign({}, cardPeriods, { [key]: { closed: !isClosed, actualTotal: isNaN(actual)?null:actual } });
+          periods[cardId] = Object.assign({}, cardPeriods, { [key]: {
+            closed: !isClosed,
+            actualCharges: isNaN(actualCharges)?null:actualCharges,
+            actualCredits: isNaN(actualCredits)?null:actualCredits
+          }});
           const data = await apiPost('saveSettings', { data: { periods } });
           applyData(data);
           showToast(isClosed ? 'Period reopened' : 'Period marked reconciled');
