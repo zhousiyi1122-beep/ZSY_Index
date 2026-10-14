@@ -764,13 +764,15 @@ function renderHeader(){
     const end = periodEndFor(now, c.closingDay||15);
     const daysLeft = Math.round((end - new Date(now+'T00:00:00')) / 86400000);
     const periodTxns = state.transactions.filter(t => t.paymentMethod===c.name && periodKeyFor(t.date, c.closingDay||15)===key);
-    // Only count what's actually happened so far — a future-dated Afterpay
-    // installment sitting in the same statement period as today shouldn't
-    // read as already charged just because its date falls before the
-    // period closes.
-    const spend = periodTxns.filter(t=>t.date<=now).reduce((s,t)=>s+t.amount,0);
+    // Future-dated installments shouldn't read as already charged just
+    // because their date falls before the period closes.
     const upcoming = periodTxns.filter(t=>t.date>now).reduce((s,t)=>s+t.amount,0);
-    return { card:c, key, daysLeft, spend, upcoming };
+    // The headline figure and headroom are based on the card's actual
+    // overall balance owed, not this period's net activity alone — netting
+    // a big payment against few new charges within just this window can
+    // swing negative and make headroom look bigger than the credit limit.
+    const balance = cardBalance(c);
+    return { card:c, key, daysLeft, balance, upcoming };
   });
   const unreconciled = state.transactions.filter(t => isCardMethod(t.paymentMethod) && !t.reconciled).length;
 
@@ -778,12 +780,12 @@ function renderHeader(){
   // Show every card, not just whichever closes soonest — sorted so the
   // most urgent one still reads first.
   [...cardStats].sort((a,b)=>a.daysLeft-b.daysLeft).forEach(cs=>{
-    statsHtml += `<div class="stat-chip${cs.daysLeft<=3?' warn':''}"><b>${fmtMoney(cs.spend)}</b> ${escapeHtml(cs.card.name)} \u00b7 ${cs.daysLeft}d to close</div>`;
+    statsHtml += `<div class="stat-chip${cs.daysLeft<=3?' warn':''}"><b>${fmtMoney(cs.balance)}</b> ${escapeHtml(cs.card.name)} \u00b7 ${cs.daysLeft}d to close</div>`;
     if(cs.upcoming > 0.001){
       statsHtml += `<div class="stat-chip"><b>${fmtMoney(cs.upcoming)}</b> ${escapeHtml(cs.card.name)} upcoming</div>`;
     }
     if(cs.card.creditLimit){
-      const committed = cs.spend + cs.upcoming;
+      const committed = cs.balance + cs.upcoming;
       const over = committed > cs.card.creditLimit;
       statsHtml += `<div class="stat-chip${over?' bad':''}"><b>${fmtMoney(cs.card.creditLimit - committed)}</b> ${escapeHtml(cs.card.name)} headroom</div>`;
     }
