@@ -359,6 +359,23 @@ function giftCardTag(t){
   if(isGiftCardMethod(t.paymentMethod)) return `<span class="tag" style="color:var(--accent);">Gift card redemption</span>`;
   return '';
 }
+// The original load and every later recharge are separate transactions —
+// g.loadedAmount/loadedDate/cardName only ever reflect the original one.
+// This finds whichever funding event (load or recharge) actually happened
+// most recently, so the display shows current info instead of stale
+// original-load info once a card's been topped up since.
+function mostRecentGiftCardFunding(g){
+  const candidates = state.transactions.filter(t =>
+    t.category === GIFT_CARD_LOAD_CATEGORY && t.amount > 0 &&
+    (t.vendor === g.name || t.vendor === `Recharge ${g.name}`)
+  );
+  if(!candidates.length){
+    return { amount: Number(g.loadedAmount||0), date: g.loadedDate, source: g.cardName };
+  }
+  candidates.sort((a,b)=> b.date.localeCompare(a.date) || String(b.id).localeCompare(String(a.id)));
+  const latest = candidates[0];
+  return { amount: latest.amount, date: latest.date, source: latest.paymentMethod };
+}
 // Same full, live list as Transfer money — any current payment method
 // except Afterpay (its 4-installment split doesn't fit a single amount).
 // Non-monetary sources (loyalty points, promotions) are offered alongside
@@ -886,10 +903,11 @@ function viewDashboard(){
       <div class="card-title">Gift Card Balance</div>
       ${getGiftCards().map(g=>{
         const bal = giftCardBalance(g);
+        const recent = mostRecentGiftCardFunding(g);
         return `
           <div class="metric" style="margin-bottom:10px;">
             <div class="v">${fmtMoney(bal)}</div>
-            <div class="l">${escapeHtml(g.name)} \u00b7 loaded ${fmtMoney(g.loadedAmount)} via ${escapeHtml(g.cardName)}</div>
+            <div class="l">${escapeHtml(g.name)} \u00b7 last loaded ${fmtMoney(recent.amount)} via ${escapeHtml(recent.source)} on ${fmtDate(recent.date)}</div>
           </div>`;
       }).join('')}
     </div>` : '';
@@ -1531,7 +1549,7 @@ function settingsSectionGiftCards(){
         <div class="list-row">
           <div>
             <div class="n">${escapeHtml(g.name)}</div>
-            <div class="m">Loaded ${fmtMoney(g.loadedAmount)} via ${escapeHtml(g.cardName)} on ${fmtDate(g.loadedDate)} \u00b7 ${fmtMoney(giftCardBalance(g))} remaining</div>
+            <div class="m">Last loaded ${fmtMoney(mostRecentGiftCardFunding(g).amount)} via ${escapeHtml(mostRecentGiftCardFunding(g).source)} on ${fmtDate(mostRecentGiftCardFunding(g).date)} \u00b7 ${fmtMoney(giftCardBalance(g))} remaining</div>
           </div>
           <div class="row-actions">
             <button class="x-btn" data-recharge-giftcard="${g.id}" style="color:var(--accent);font-size:15px;">&#8635;</button>
