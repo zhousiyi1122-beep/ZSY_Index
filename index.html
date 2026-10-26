@@ -467,7 +467,13 @@ function getDueForConfirmation(){
   return getSchedules().filter(sc => sc.active !== false && sc.autoPost === false && sc.nextDue && sc.nextDue <= today);
 }
 function scheduleMethodOptions(){ return allPaymentMethodOptions().filter(m=>m!=='Afterpay'); }
-function frequencyLabel(f){ return f==='weekly' ? 'Weekly' : f==='fortnightly' ? 'Fortnightly' : 'Monthly'; }
+function frequencyLabel(f){
+  const labels = {
+    once: 'Once only', weekly: 'Weekly', fortnightly: 'Fortnightly', monthly: 'Monthly',
+    bimonthly: 'Bimonthly', quarterly: 'Quarterly', 'half-yearly': 'Half-yearly', yearly: 'Yearly'
+  };
+  return labels[f] || 'Monthly';
+}
 
 // Afterpay's real schedule: 4 equal payments, 14 days apart, starting on
 // the purchase date. Any odd cent from the split lands on the last payment.
@@ -1751,10 +1757,16 @@ function settingsSectionSchedules(){
           <select id="esch-category-${sc.id}">${(s.categories||[]).map(c=>`<option value="${escapeHtml(c)}"${c===sc.category?' selected':''}>${escapeHtml(c)}</option>`).join('')}</select>
           <label for="esch-freq-${sc.id}">Frequency</label>
           <select id="esch-freq-${sc.id}">
+            <option value="once"${sc.frequency==='once'?' selected':''}>Once only</option>
             <option value="weekly"${sc.frequency==='weekly'?' selected':''}>Weekly</option>
             <option value="fortnightly"${sc.frequency==='fortnightly'?' selected':''}>Fortnightly</option>
             <option value="monthly"${sc.frequency==='monthly'?' selected':''}>Monthly</option>
+            <option value="bimonthly"${sc.frequency==='bimonthly'?' selected':''}>Bimonthly</option>
+            <option value="quarterly"${sc.frequency==='quarterly'?' selected':''}>Quarterly</option>
+            <option value="half-yearly"${sc.frequency==='half-yearly'?' selected':''}>Half-yearly</option>
+            <option value="yearly"${sc.frequency==='yearly'?' selected':''}>Yearly</option>
           </select>
+          ${sc.frequency==='once' ? `<div class="helptext" style="margin-top:4px;">Logs once on the due date below, then won't repeat.</div>` : ''}
           <label for="esch-next-${sc.id}">Next due date</label>
           <input type="date" id="esch-next-${sc.id}" value="${sc.nextDue}">
           <label for="esch-notes-${sc.id}">Notes (optional)</label>
@@ -1795,9 +1807,14 @@ function settingsSectionSchedules(){
         <select id="ns-category">${(s.categories||[]).map(c=>`<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('')}</select>
         <label for="ns-freq">Frequency</label>
         <select id="ns-freq">
+          <option value="once">Once only</option>
           <option value="weekly">Weekly</option>
           <option value="fortnightly">Fortnightly</option>
           <option value="monthly" selected>Monthly</option>
+          <option value="bimonthly">Bimonthly</option>
+          <option value="quarterly">Quarterly</option>
+          <option value="half-yearly">Half-yearly</option>
+          <option value="yearly">Yearly</option>
         </select>
         <label for="ns-next">First due date</label>
         <input type="date" id="ns-next" value="${todayStr()}">
@@ -2509,12 +2526,24 @@ function attachHandlers(){
         const category = document.getElementById(`em-category-${id}`).value;
         const paymentMethod = document.getElementById(`em-method-${id}`).value;
         if(!name) return;
+        // Renaming to a name that already belongs to a different merchant
+        // would otherwise leave two duplicate records behind, even though
+        // the rename itself correctly consolidates past transactions onto
+        // one name — so merge them into one record instead.
+        const duplicate = state.merchants.find(m2 => String(m2.id)!==String(id) && m2.name.toLowerCase()===name.toLowerCase());
+        if(duplicate && !confirmDelete(`"${name}" already exists as a separate merchant. Merge these two into one? Past transactions under either name will end up under "${name}", and the duplicate record will be removed.`)) return;
         btn.disabled = true; btn.textContent = 'Saving…';
         try{
           const data = await apiPost('updateMerchant', { data: { id, name, category, paymentMethod } });
           applyData(data);
+          if(duplicate){
+            const data2 = await apiPost('deleteMerchant', { id: duplicate.id });
+            applyData(data2);
+            showToast('Merchants merged');
+          } else {
+            showToast('Merchant updated');
+          }
           editingMerchantId = null;
-          showToast('Merchant updated');
           render();
         }catch(err){ setSync('bad'); showToast('Could not save', true); btn.disabled = false; btn.textContent = 'Save'; }
       });
