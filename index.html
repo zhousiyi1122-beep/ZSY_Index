@@ -925,8 +925,8 @@ function viewDashboard(){
       ${dueSchedules.map(sc=>`
         <div class="list-row" style="display:block;">
           <div style="display:flex;justify-content:space-between;align-items:baseline;">
-            <div class="n">${escapeHtml(sc.vendor)}${sc.amount<0?' <span class="tag" style="color:var(--money);">Income</span>':''}</div>
-            <div class="helptext">due ${fmtDate(sc.nextDue)} \u00b7 ${escapeHtml(sc.paymentMethod)}</div>
+            <div class="n">${scheduleType(sc)==='transfer' ? `${escapeHtml(sc.transferFrom||'?')} \u2192 ${escapeHtml(sc.transferTo||'?')} <span class="tag" style="color:var(--accent);">Transfer</span>` : `${escapeHtml(sc.vendor)}${sc.amount<0?' <span class="tag" style="color:var(--money);">Income</span>':''}`}</div>
+            <div class="helptext">due ${fmtDate(sc.nextDue)}${scheduleType(sc)==='transfer' ? '' : ` \u00b7 ${escapeHtml(sc.paymentMethod)}`}</div>
           </div>
           <div class="row-flex" style="margin-top:8px;">
             <input type="number" class="mono due-confirm-amount" data-schedule-id="${sc.id}" data-income="${sc.amount<0?'1':'0'}" step="0.01" min="0" value="${Math.abs(sc.amount)}" style="flex:1;">
@@ -1034,6 +1034,7 @@ function viewAdd(){
           <div class="pill-group" id="f-category-group">
             ${cats.map(c=>`<div class="pill${c===firstExpenseCat?' active':''}" data-value="${escapeHtml(c)}" data-cat-type="${getCategoryType(c)}" style="display:${(getCategoryType(c)==='expense'||getCategoryType(c)==='both')?'':'none'};">${escapeHtml(c)}</div>`).join('')}
           </div>
+          <div class="helptext" id="f-category-empty" style="display:none;color:var(--pending);">No categories are tagged for this type yet — add one in Settings \u2192 Categories (set "Applies to"), or edit an existing category to include it.</div>
           <div class="field-error-msg" id="f-category-error"></div>
         </div>
 
@@ -1181,7 +1182,15 @@ function viewEditTxn(id){
 
         <label>Category</label>
         <div class="pill-group" id="ef-category-group">
-          ${cats.map(c=>`<div class="pill${c===t.category?' active':''}" data-value="${escapeHtml(c)}">${escapeHtml(c)}</div>`).join('')}
+          ${cats.map(c=>{
+            // System categories (transfer/gift card/afterpay) have no
+            // expense/income tag — they stay visible only on the transaction
+            // that already carries one.
+            const ct = SYSTEM_CATEGORIES.includes(c) ? 'system' : getCategoryType(c);
+            const startType = t.amount<0 ? 'income' : 'expense';
+            const show = c===t.category || ct===startType || ct==='both';
+            return `<div class="pill${c===t.category?' active':''}" data-value="${escapeHtml(c)}" data-cat-type="${ct}" style="display:${show?'':'none'};">${escapeHtml(c)}</div>`;
+          }).join('')}
         </div>
 
         <label for="ef-notes">Notes</label>
@@ -1729,46 +1738,58 @@ function settingsSectionMethods(){
   `;
 }
 
+// Older schedules have no explicit type — expense/income is inferred from
+// the amount's sign, same as before. Transfers are always explicit.
+function scheduleType(sc){
+  if(sc.type) return sc.type;
+  return sc.amount < 0 ? 'income' : 'expense';
+}
 function settingsSectionSchedules(){
   const s = state.settings;
+  const transferOpts = (selected) => transferMethodOptions().map(m=>`<option value="${escapeHtml(m)}"${m===selected?' selected':''}>${escapeHtml(m)}</option>`).join('');
+  const freqOpts = (selected) => [['once','Once only'],['weekly','Weekly'],['fortnightly','Fortnightly'],['monthly','Monthly'],['bimonthly','Bimonthly'],['quarterly','Quarterly'],['half-yearly','Half-yearly'],['yearly','Yearly']]
+    .map(([v,l])=>`<option value="${v}"${v===selected?' selected':''}>${l}</option>`).join('');
+  const catOpts = (type, selected) => categoryOptionsForType(type).map(c=>`<option value="${escapeHtml(c)}"${c===selected?' selected':''}>${escapeHtml(c)}</option>`).join('');
   return `
     <div class="card">
       <div class="card-title">Scheduled payments</div>
-      <div class="helptext" style="margin-bottom:10px;">"Auto-log" schedules record themselves on their due date, catching up on anything missed since you last opened the app. "Confirm each time" schedules wait instead — they show up as due on the Dashboard until you tap Confirm, so you get one-tap logging without re-typing the whole entry, and a chance to adjust the amount if it varies (a utility bill, say). Works for recurring income too — wages, interest, anything on a regular schedule. For true background automation of auto-log schedules even when the app's closed, open <code>Code.gs</code> in the Apps Script editor, select <code>createDailyScheduleTrigger</code> in the function dropdown, and click Run once (one-time authorization).</div>
-      ${getSchedules().length ? getSchedules().map(sc=> sc.id===editingScheduleId ? `
+      <div class="helptext" style="margin-bottom:10px;">"Auto-log" schedules record themselves on their due date, catching up on anything missed since you last opened the app. "Confirm each time" schedules wait instead — they show up as due on the Dashboard until you tap Confirm, so you get one-tap logging without re-typing the whole entry, and a chance to adjust the amount if it varies (a utility bill, say). Works for recurring income and recurring transfers too — wages, interest, a regular payment toward a card. For true background automation of auto-log schedules even when the app's closed, open <code>Code.gs</code> in the Apps Script editor, select <code>createDailyScheduleTrigger</code> in the function dropdown, and click Run once (one-time authorization).</div>
+      ${getSchedules().length ? getSchedules().map(sc=>{
+        const type = scheduleType(sc);
+        return sc.id===editingScheduleId ? `
         <div class="list-row" style="display:block;padding-bottom:14px;">
-          <label for="esch-vendor-${sc.id}">Vendor</label>
-          <input type="text" id="esch-vendor-${sc.id}" value="${escapeHtml(sc.vendor)}">
-          <label for="esch-amount-${sc.id}">Amount (AUD)</label>
-          <input type="number" id="esch-amount-${sc.id}" class="mono" step="0.01" min="0" value="${Math.abs(sc.amount)}">
           <label>Type</label>
           <div class="pill-group" id="esch-type-${sc.id}">
-            <div class="pill${sc.amount<0?'':' active'}" data-value="expense">Expense</div>
-            <div class="pill${sc.amount<0?' active':''}" data-value="income">Income</div>
+            <div class="pill${type==='expense'?' active':''}" data-value="expense">Expense</div>
+            <div class="pill${type==='income'?' active':''}" data-value="income">Income</div>
+            <div class="pill${type==='transfer'?' active':''}" data-value="transfer">Transfer</div>
+          </div>
+          <label for="esch-amount-${sc.id}">Amount (AUD)</label>
+          <input type="number" id="esch-amount-${sc.id}" class="mono" step="0.01" min="0" value="${Math.abs(sc.amount)}">
+          <div id="esch-normal-${sc.id}" style="display:${type==='transfer'?'none':'block'};">
+            <label for="esch-vendor-${sc.id}">Vendor</label>
+            <input type="text" id="esch-vendor-${sc.id}" value="${escapeHtml(sc.vendor||'')}">
+            <label for="esch-method-${sc.id}">Payment method</label>
+            <select id="esch-method-${sc.id}">${scheduleMethodOptions().map(m=>`<option value="${escapeHtml(m)}"${m===sc.paymentMethod?' selected':''}>${escapeHtml(m)}</option>`).join('')}</select>
+            <label for="esch-category-${sc.id}">Category</label>
+            <select id="esch-category-${sc.id}">${catOpts(type==='transfer'?'expense':type, sc.category)}</select>
+          </div>
+          <div id="esch-transfer-${sc.id}" style="display:${type==='transfer'?'block':'none'};">
+            <label for="esch-from-${sc.id}">From</label>
+            <select id="esch-from-${sc.id}">${transferOpts(sc.transferFrom)}</select>
+            <label for="esch-to-${sc.id}">To</label>
+            <select id="esch-to-${sc.id}">${transferOpts(sc.transferTo)}</select>
           </div>
           <label>Reminder type</label>
           <div class="pill-group" id="esch-autopost-${sc.id}">
             <div class="pill${sc.autoPost===false?'':' active'}" data-value="auto">Auto-log</div>
             <div class="pill${sc.autoPost===false?' active':''}" data-value="confirm">Confirm each time</div>
           </div>
-          <label for="esch-method-${sc.id}">Payment method</label>
-          <select id="esch-method-${sc.id}">${scheduleMethodOptions().map(m=>`<option value="${escapeHtml(m)}"${m===sc.paymentMethod?' selected':''}>${escapeHtml(m)}</option>`).join('')}</select>
-          <label for="esch-category-${sc.id}">Category</label>
-          <select id="esch-category-${sc.id}">${(s.categories||[]).map(c=>`<option value="${escapeHtml(c)}"${c===sc.category?' selected':''}>${escapeHtml(c)}</option>`).join('')}</select>
           <label for="esch-freq-${sc.id}">Frequency</label>
-          <select id="esch-freq-${sc.id}">
-            <option value="once"${sc.frequency==='once'?' selected':''}>Once only</option>
-            <option value="weekly"${sc.frequency==='weekly'?' selected':''}>Weekly</option>
-            <option value="fortnightly"${sc.frequency==='fortnightly'?' selected':''}>Fortnightly</option>
-            <option value="monthly"${sc.frequency==='monthly'?' selected':''}>Monthly</option>
-            <option value="bimonthly"${sc.frequency==='bimonthly'?' selected':''}>Bimonthly</option>
-            <option value="quarterly"${sc.frequency==='quarterly'?' selected':''}>Quarterly</option>
-            <option value="half-yearly"${sc.frequency==='half-yearly'?' selected':''}>Half-yearly</option>
-            <option value="yearly"${sc.frequency==='yearly'?' selected':''}>Yearly</option>
-          </select>
-          ${sc.frequency==='once' ? `<div class="helptext" style="margin-top:4px;">Logs once on the due date below, then won't repeat.</div>` : ''}
+          <select id="esch-freq-${sc.id}">${freqOpts(sc.frequency)}</select>
+          <div class="helptext" style="margin-top:4px;">"Once only" logs on the due date below, then won't repeat.</div>
           <label for="esch-next-${sc.id}">Next due date</label>
-          <input type="date" id="esch-next-${sc.id}" value="${sc.nextDue}">
+          <input type="date" id="esch-next-${sc.id}" value="${sc.nextDue||todayStr()}">
           <label for="esch-notes-${sc.id}">Notes (optional)</label>
           <textarea id="esch-notes-${sc.id}" rows="2" placeholder="Anything worth remembering">${escapeHtml(sc.notes||'')}</textarea>
           <div class="row-flex" style="margin-top:14px;">
@@ -1778,44 +1799,50 @@ function settingsSectionSchedules(){
         </div>` : `
         <div class="list-row">
           <div>
-            <div class="n">${escapeHtml(sc.vendor)} \u00b7 <span style="${sc.amount<0?'color:var(--money);':''}">${sc.amount<0?'+':''}${fmtMoney(Math.abs(sc.amount))}</span>${sc.amount<0?' <span class="tag" style="color:var(--money);">Income</span>':''}</div>
-            <div class="m">${frequencyLabel(sc.frequency)} \u00b7 ${escapeHtml(sc.paymentMethod)} \u00b7 next ${fmtDate(sc.nextDue)} \u00b7 ${sc.autoPost===false?'confirm each time':'auto-log'}</div>
+            ${type==='transfer' ? `
+              <div class="n">${escapeHtml(sc.transferFrom||'?')} \u2192 ${escapeHtml(sc.transferTo||'?')} \u00b7 ${fmtMoney(Math.abs(sc.amount))} <span class="tag" style="color:var(--accent);">Transfer</span></div>
+              <div class="m">${frequencyLabel(sc.frequency)} \u00b7 ${sc.nextDue ? `next ${fmtDate(sc.nextDue)}` : 'completed'} \u00b7 ${sc.autoPost===false?'confirm each time':'auto-log'}</div>
+            ` : `
+              <div class="n">${escapeHtml(sc.vendor)} \u00b7 <span style="${type==='income'?'color:var(--money);':''}">${type==='income'?'+':''}${fmtMoney(Math.abs(sc.amount))}</span>${type==='income'?' <span class="tag" style="color:var(--money);">Income</span>':''}</div>
+              <div class="m">${frequencyLabel(sc.frequency)} \u00b7 ${escapeHtml(sc.paymentMethod)} \u00b7 ${sc.nextDue ? `next ${fmtDate(sc.nextDue)}` : 'completed'} \u00b7 ${sc.autoPost===false?'confirm each time':'auto-log'}</div>
+            `}
           </div>
           <div class="row-actions">
             <button class="x-btn" data-edit-schedule="${sc.id}" style="color:var(--ink-dim);">&#9998;</button>
             <button class="x-btn" data-remove-schedule="${sc.id}">&times;</button>
           </div>
-        </div>`).join('') : `<div class="empty">No scheduled payments yet.</div>`}
+        </div>`;
+      }).join('') : `<div class="empty">No scheduled payments yet.</div>`}
       <div style="margin-top:14px;">
-        <label for="ns-vendor">Vendor</label>
-        <input type="text" id="ns-vendor" placeholder="e.g. Xero subscription">
-        <label for="ns-amount">Amount (AUD)</label>
-        <input type="number" id="ns-amount" class="mono" step="0.01" min="0" placeholder="0.00">
         <label>Type</label>
         <div class="pill-group" id="ns-type-group">
           <div class="pill active" data-value="expense">Expense</div>
           <div class="pill" data-value="income">Income</div>
+          <div class="pill" data-value="transfer">Transfer</div>
+        </div>
+        <label for="ns-amount">Amount (AUD)</label>
+        <input type="number" id="ns-amount" class="mono" step="0.01" min="0" placeholder="0.00">
+        <div id="ns-normal-section">
+          <label for="ns-vendor">Vendor</label>
+          <input type="text" id="ns-vendor" placeholder="e.g. Xero subscription">
+          <label for="ns-method">Payment method</label>
+          <select id="ns-method">${scheduleMethodOptions().map(m=>`<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join('')}</select>
+          <label for="ns-category">Category</label>
+          <select id="ns-category">${catOpts('expense')}</select>
+        </div>
+        <div id="ns-transfer-section" style="display:none;">
+          <label for="ns-from">From</label>
+          <select id="ns-from">${transferOpts()}</select>
+          <label for="ns-to">To</label>
+          <select id="ns-to">${transferOpts()}</select>
         </div>
         <label>Reminder type</label>
         <div class="pill-group" id="ns-autopost-group">
           <div class="pill active" data-value="auto">Auto-log</div>
           <div class="pill" data-value="confirm">Confirm each time</div>
         </div>
-        <label for="ns-method">Payment method</label>
-        <select id="ns-method">${scheduleMethodOptions().map(m=>`<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join('')}</select>
-        <label for="ns-category">Category</label>
-        <select id="ns-category">${(s.categories||[]).map(c=>`<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('')}</select>
         <label for="ns-freq">Frequency</label>
-        <select id="ns-freq">
-          <option value="once">Once only</option>
-          <option value="weekly">Weekly</option>
-          <option value="fortnightly">Fortnightly</option>
-          <option value="monthly" selected>Monthly</option>
-          <option value="bimonthly">Bimonthly</option>
-          <option value="quarterly">Quarterly</option>
-          <option value="half-yearly">Half-yearly</option>
-          <option value="yearly">Yearly</option>
-        </select>
+        <select id="ns-freq">${freqOpts('monthly')}</select>
         <label for="ns-next">First due date</label>
         <input type="date" id="ns-next" value="${todayStr()}">
         <label for="ns-notes">Notes (optional)</label>
@@ -1919,6 +1946,9 @@ function attachHandlers(){
             const firstVisible = Array.from(document.querySelectorAll('#f-category-group .pill')).find(cp=>cp.style.display !== 'none');
             if(firstVisible) firstVisible.classList.add('active');
           }
+          const anyVisible = Array.from(document.querySelectorAll('#f-category-group .pill')).some(cp=>cp.style.display !== 'none');
+          const emptyMsg = document.getElementById('f-category-empty');
+          if(emptyMsg) emptyMsg.style.display = anyVisible ? 'none' : 'block';
         }
       });
     });
@@ -1954,7 +1984,7 @@ function attachHandlers(){
       const isIncome = document.querySelector('#f-type-group .pill.active')?.dataset.value === 'income';
       const amount = isIncome ? -Math.abs(rawAmount) : Math.abs(rawAmount);
       const method = document.querySelector('#f-method-group .pill.active')?.dataset.value || allPaymentMethodOptions()[0];
-      const category = document.querySelector('#f-category-group .pill.active')?.dataset.value || (state.settings.categories||[])[0];
+      const category = document.querySelector('#f-category-group .pill.active')?.dataset.value;
       const notes = document.getElementById('f-notes').value.trim();
       const selectedType = document.querySelector('#f-type-group .pill.active')?.dataset.value || 'expense';
 
@@ -2031,6 +2061,13 @@ function attachHandlers(){
         document.getElementById(firstInvalid).focus();
         return;
       }
+      if(!category){
+        const catErr = document.getElementById('f-category-error');
+        if(catErr) catErr.textContent = 'Pick a category — add one in Settings \u2192 Categories if none are available for this type.';
+        showToast('Pick a category first', true);
+        return;
+      }
+      const catErrClear = document.getElementById('f-category-error'); if(catErrClear) catErrClear.textContent = '';
       const btn = document.getElementById('add-submit-btn');
       btn.disabled = true; btn.textContent = 'Saving…';
       try{
@@ -2673,10 +2710,20 @@ function attachHandlers(){
       });
     });
 
+    // Switching Expense/Income/Transfer swaps which fields show, and — for
+    // Expense/Income — rebuilds the Category list to only the ones tagged
+    // for that type.
+    const applyScheduleTypeUI = (type, normalEl, transferEl, categoryEl) => {
+      const isTransfer = type === 'transfer';
+      if(normalEl) normalEl.style.display = isTransfer ? 'none' : 'block';
+      if(transferEl) transferEl.style.display = isTransfer ? 'block' : 'none';
+      if(!isTransfer) rebuildCategorySelect(categoryEl, type);
+    };
     document.querySelectorAll('#ns-type-group .pill').forEach(p=>{
       p.addEventListener('click', ()=>{
         document.querySelectorAll('#ns-type-group .pill').forEach(x=>x.classList.remove('active'));
         p.classList.add('active');
+        applyScheduleTypeUI(p.dataset.value, document.getElementById('ns-normal-section'), document.getElementById('ns-transfer-section'), document.getElementById('ns-category'));
       });
     });
     document.querySelectorAll('#ns-autopost-group .pill').forEach(p=>{
@@ -2686,23 +2733,38 @@ function attachHandlers(){
       });
     });
     document.getElementById('add-schedule-btn')?.addEventListener('click', async ()=>{
-      const vendor = document.getElementById('ns-vendor').value.trim();
       const rawAmount = parseFloat(document.getElementById('ns-amount').value);
-      if(!vendor || isNaN(rawAmount)) return;
-      const isIncome = document.querySelector('#ns-type-group .pill.active')?.dataset.value === 'income';
+      const type = document.querySelector('#ns-type-group .pill.active')?.dataset.value || 'expense';
       const autoPost = document.querySelector('#ns-autopost-group .pill.active')?.dataset.value !== 'confirm';
-      const schedule = {
-        id: uid(),
-        vendor,
-        amount: isIncome ? -Math.abs(rawAmount) : Math.abs(rawAmount),
-        autoPost,
-        paymentMethod: document.getElementById('ns-method').value,
-        category: document.getElementById('ns-category').value,
-        frequency: document.getElementById('ns-freq').value,
-        nextDue: document.getElementById('ns-next').value,
-        notes: document.getElementById('ns-notes').value.trim(),
-        active: true
-      };
+      if(isNaN(rawAmount) || rawAmount <= 0){ showToast('Enter an amount greater than zero', true); return; }
+      let schedule;
+      if(type === 'transfer'){
+        const transferFrom = document.getElementById('ns-from').value;
+        const transferTo = document.getElementById('ns-to').value;
+        if(!transferFrom || !transferTo || transferFrom === transferTo){ showToast('Pick two different sides to transfer between', true); return; }
+        schedule = {
+          id: uid(), type: 'transfer', transferFrom, transferTo, vendor: '',
+          amount: Math.abs(rawAmount), autoPost,
+          frequency: document.getElementById('ns-freq').value,
+          nextDue: document.getElementById('ns-next').value,
+          notes: document.getElementById('ns-notes').value.trim(),
+          active: true
+        };
+      } else {
+        const vendor = document.getElementById('ns-vendor').value.trim();
+        if(!vendor){ showToast('Vendor is required', true); return; }
+        schedule = {
+          id: uid(), type, vendor,
+          amount: type === 'income' ? -Math.abs(rawAmount) : Math.abs(rawAmount),
+          autoPost,
+          paymentMethod: document.getElementById('ns-method').value,
+          category: document.getElementById('ns-category').value,
+          frequency: document.getElementById('ns-freq').value,
+          nextDue: document.getElementById('ns-next').value,
+          notes: document.getElementById('ns-notes').value.trim(),
+          active: true
+        };
+      }
       const schedules = [...getSchedules(), schedule];
       const addScheduleBtn = document.getElementById('add-schedule-btn');
       addScheduleBtn.disabled = true; const origText = addScheduleBtn.textContent; addScheduleBtn.textContent = 'Adding…';
@@ -2731,27 +2793,41 @@ function attachHandlers(){
         const group = p.parentElement;
         group.querySelectorAll('.pill').forEach(x=>x.classList.remove('active'));
         p.classList.add('active');
+        const sid = group.id.replace('esch-type-','');
+        applyScheduleTypeUI(p.dataset.value, document.getElementById(`esch-normal-${sid}`), document.getElementById(`esch-transfer-${sid}`), document.getElementById(`esch-category-${sid}`));
       });
     });
     document.querySelectorAll('[data-save-schedule]').forEach(btn=>{
       btn.addEventListener('click', async ()=>{
         const id = btn.dataset.saveSchedule;
-        const vendor = document.getElementById(`esch-vendor-${id}`).value.trim();
         const rawAmount = parseFloat(document.getElementById(`esch-amount-${id}`).value);
-        if(!vendor || isNaN(rawAmount)) return;
-        const isIncome = document.querySelector(`#esch-type-${id} .pill.active`)?.dataset.value === 'income';
+        const type = document.querySelector(`#esch-type-${id} .pill.active`)?.dataset.value || 'expense';
         const autoPost = document.querySelector(`#esch-autopost-${id} .pill.active`)?.dataset.value !== 'confirm';
-        const schedules = getSchedules().map(sc => sc.id!==id ? sc : {
-          ...sc,
-          vendor,
-          amount: isIncome ? -Math.abs(rawAmount) : Math.abs(rawAmount),
+        if(isNaN(rawAmount) || rawAmount <= 0){ showToast('Enter an amount greater than zero', true); return; }
+        const common = {
           autoPost,
-          paymentMethod: document.getElementById(`esch-method-${id}`).value,
-          category: document.getElementById(`esch-category-${id}`).value,
           frequency: document.getElementById(`esch-freq-${id}`).value,
           nextDue: document.getElementById(`esch-next-${id}`).value,
           notes: document.getElementById(`esch-notes-${id}`).value.trim()
-        });
+        };
+        let changes;
+        if(type === 'transfer'){
+          const transferFrom = document.getElementById(`esch-from-${id}`).value;
+          const transferTo = document.getElementById(`esch-to-${id}`).value;
+          if(!transferFrom || !transferTo || transferFrom === transferTo){ showToast('Pick two different sides to transfer between', true); return; }
+          changes = { ...common, type:'transfer', transferFrom, transferTo, vendor:'', amount: Math.abs(rawAmount), paymentMethod:undefined, category:undefined };
+        } else {
+          const vendor = document.getElementById(`esch-vendor-${id}`).value.trim();
+          if(!vendor){ showToast('Vendor is required', true); return; }
+          changes = {
+            ...common, type, vendor,
+            amount: type === 'income' ? -Math.abs(rawAmount) : Math.abs(rawAmount),
+            paymentMethod: document.getElementById(`esch-method-${id}`).value,
+            category: document.getElementById(`esch-category-${id}`).value,
+            transferFrom: undefined, transferTo: undefined
+          };
+        }
+        const schedules = getSchedules().map(sc => sc.id!==id ? sc : { ...sc, ...changes });
         btn.disabled = true; btn.textContent = 'Saving…';
         try{
           const data = await apiPost('saveSettings', { data: { schedules } });
@@ -2793,6 +2869,19 @@ function attachEditHandlers(id){
     p.addEventListener('click', ()=>{
       document.querySelectorAll('#ef-type-group .pill').forEach(x=>x.classList.remove('active'));
       p.classList.add('active');
+      // Only show categories tagged for the chosen type (or "both"); system
+      // categories are hidden once you switch type since they only make
+      // sense on the transaction that originally carried them.
+      document.querySelectorAll('#ef-category-group .pill').forEach(cp=>{
+        const ct = cp.dataset.catType;
+        cp.style.display = (ct === p.dataset.value || ct === 'both') ? '' : 'none';
+      });
+      const activeCat = document.querySelector('#ef-category-group .pill.active');
+      if(!activeCat || activeCat.style.display === 'none'){
+        document.querySelectorAll('#ef-category-group .pill').forEach(x=>x.classList.remove('active'));
+        const firstVisible = Array.from(document.querySelectorAll('#ef-category-group .pill')).find(cp=>cp.style.display !== 'none');
+        if(firstVisible) firstVisible.classList.add('active');
+      }
     });
   });
   document.querySelectorAll('#ef-method-group .pill').forEach(p=>{
