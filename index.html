@@ -417,6 +417,18 @@ function categoryOptionsForType(type){
     return ct === type || ct === 'both';
   });
 }
+// For a plain <select> (the Scheduled payments forms), hiding options by
+// CSS doesn't reliably work across browsers, so this rebuilds the option
+// list outright whenever Expense/Income is switched.
+function rebuildCategorySelect(selectEl, type){
+  if(!selectEl) return;
+  const options = categoryOptionsForType(type);
+  const currentValue = selectEl.value;
+  selectEl.innerHTML = options.map(c=>`<option value="${escapeHtml(c)}"${c===currentValue?' selected':''}>${escapeHtml(c)}</option>`).join('');
+  if(!options.includes(currentValue) && options.length){
+    selectEl.value = options[0];
+  }
+}
 async function ensureCategoryExists(catName){
   if((state.settings.categories||[]).includes(catName)) return;
   const categories = [...(state.settings.categories||[]), catName];
