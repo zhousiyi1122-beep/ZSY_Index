@@ -145,6 +145,7 @@
   .row-flex .btn{margin-top:0;}
   .helptext{font-size:11.5px;color:var(--ink-dim);margin-top:6px;line-height:1.4;}
   .field-error{border-color:var(--alert) !important;box-shadow:0 0 0 1px var(--alert);}
+  .ocr-filled{box-shadow:0 0 0 2px var(--accent) !important;}
   .field-error-msg{font-size:11.5px;color:var(--alert);margin-top:4px;line-height:1.4;}
 
   .txn-item{
@@ -738,6 +739,149 @@ function findMerchant(name){
   const n = name.trim().toLowerCase();
   return state.merchants.find(m => m.name.toLowerCase() === n);
 }
+/* ============ Receipt scanning (OCR) ============ */
+// Tesseract.js is only fetched the first time someone actually scans, so it
+// costs nothing at app start-up. It runs entirely in the browser; the
+// photo is never uploaded anywhere.
+let tesseractLoading = null;
+function loadTesseract(){
+  if(window.Tesseract) return Promise.resolve(window.Tesseract);
+  if(tesseractLoading) return tesseractLoading;
+  tesseractLoading = new Promise((resolve, reject)=>{
+    const s = document.createElement('script');
+    s.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js';
+    s.onload = ()=> window.Tesseract ? resolve(window.Tesseract) : reject(new Error('OCR library did not initialise'));
+    s.onerror = ()=>{ tesseractLoading = null; reject(new Error('Could not download the OCR library')); };
+    document.head.appendChild(s);
+  });
+  return tesseractLoading;
+}
+
+// Phone photos are several MB; shrinking to ~1200px wide and greying them
+// out makes OCR much faster without hurting legibility.
+function compressReceiptImage(file, maxWidth = 1200, quality = 0.8){
+  return new Promise((resolve, reject)=>{
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = ()=>{
+      try{
+        let w = img.naturalWidth, h = img.naturalHeight;
+        if(w > maxWidth){ h = Math.round(h * maxWidth / w); w = maxWidth; }
+        const canvas = document.createElement('canvas');
+        canvas.width = w; canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        if('filter' in ctx) ctx.filter = 'grayscale(1) contrast(1.25)';
+        ctx.drawImage(img, 0, 0, w, h);
+        canvas.toBlob(b => b ? resolve(b) : reject(new Error('Image conversion failed')), 'image/jpeg', quality);
+      }catch(err){ reject(err); }
+      finally{ URL.revokeObjectURL(url); }
+    };
+    img.onerror = ()=>{ URL.revokeObjectURL(url); reject(new Error('Could not read the photo')); };
+    img.src = url;
+  });
+}
+
+const MONTH_NAMES = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
+function isoDate(y, m, d){
+  return y + '-' + String(m).padStart(2,'0') + '-' + String(d).padStart(2,'0');
+}
+// Australian receipts are day-first (22/09/2026), unlike the month-first
+// guess in generic OCR examples — which would turn 05/10 into May 10.
+// Returns the first plausible date (not in the future, not years old).
+function parseReceiptDate(text, today){
+  const t = new Date(today + 'T00:00:00');
+  const latest = new Date(t); latest.setDate(latest.getDate() + 1);
+  const earliest = new Date(t); earliest.setFullYear(earliest.getFullYear() - 3);
+  const candidates = [];
+  let m;
+  const numeric = /\b(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4}|\d{2})\b/g;
+  while((m = numeric.exec(text))){
+    let a = +m[1], b = +m[2], y = +m[3];
+    if(m[3].length === 2) y += 2000;
+    let day = a, mon = b;
+    if(mon > 12 && day <= 12){ day = b; mon = a; }   // only then treat as month-first
+    candidates.push([y, mon, day]);
+  }
+  const iso = /\b(\d{4})[\/\-.](\d{1,2})[\/\-.](\d{1,2})\b/g;
+  while((m = iso.exec(text))) candidates.push([+m[1], +m[2], +m[3]]);
+  const named = /\b(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]{3,9})\.?,?\s+(\d{4}|\d{2})\b/g;
+  while((m = named.exec(text))){
+    const mi = MONTH_NAMES.indexOf(m[2].slice(0,3).toLowerCase());
+    if(mi >= 0) candidates.push([m[3].length===2 ? 2000 + +m[3] : +m[3], mi + 1, +m[1]]);
+  }
+  const named2 = /\b([A-Za-z]{3,9})\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})\b/g;
+  while((m = named2.exec(text))){
+    const mi = MONTH_NAMES.indexOf(m[1].slice(0,3).toLowerCase());
+    if(mi >= 0) candidates.push([+m[3], mi + 1, +m[2]]);
+  }
+  for(const [y, mon, day] of candidates){
+    if(mon < 1 || mon > 12 || day < 1 || day > 31) continue;
+    const d = new Date(y, mon - 1, day);
+    if(d.getMonth() !== mon - 1) continue;           // e.g. 31 Feb
+    if(d > latest || d < earliest) continue;
+    return isoDate(y, mon, day);
+  }
+  return null;
+}
+
+// Prefer the amount on a TOTAL / amount-due line over simply taking the
+// biggest number — a $50 note handed over for a $12.30 purchase would
+// otherwise win. Falls back to the largest number if no total line is found.
+function parseReceiptAmount(text){
+  const num = /\d{1,3}(?:,\d{3})+\.\d{2}|\d+\.\d{2}/g;
+  const toNum = s => parseFloat(s.replace(/,/g,''));
+  const skip = /sub\s*-?\s*total|saving|gst|tax|change|round|discount|points|tendered|received|surcharge/i;
+  const want = /\b(total|amount\s+due|balance\s+due|amount\s+payable|to\s+pay|grand\s+total)\b/i;
+  const lines = text.split('\n');
+  const totals = [];
+  for(const line of lines){
+    if(want.test(line) && !skip.test(line)){
+      const found = line.match(num);
+      if(found) found.forEach(v => totals.push(toNum(v)));
+    }
+  }
+  if(totals.length) return { amount: Math.max(...totals), fromTotalLine: true };
+  const all = (text.match(num) || []).map(toNum);
+  if(all.length) return { amount: Math.max(...all), fromTotalLine: false };
+  return null;
+}
+
+function toTitleCase(s){
+  return s.toLowerCase().replace(/\b([a-z])/g, (_, ch) => ch.toUpperCase());
+}
+// Use an existing merchant when its name appears anywhere on the receipt
+// (keeps spelling consistent with your merchant list); otherwise fall back
+// to the first line that looks like a shop name rather than an address,
+// ABN, phone number or heading.
+function parseReceiptVendor(text, merchants){
+  const norm = s => ' ' + s.toLowerCase().replace(/[^a-z0-9]+/g,' ').trim() + ' ';
+  const hay = norm(text);
+  let best = null;
+  (merchants || []).forEach(m=>{
+    const n = norm(m.name);
+    if(n.trim().length >= 3 && hay.includes(n) && (!best || m.name.length > best.length)) best = m.name;
+  });
+  if(best) return { vendor: best, fromMerchant: true };
+  const junk = /^(tax\s*invoice|invoice|receipt|abn|a\.?b\.?n|welcome|thank|tel\b|phone|ph[:.\s]|www|http|store\b|shop\s*\d|date|time|customer|copy|eftpos|order|table|\d)/i;
+  const lines = text.split('\n').map(l => l.trim()).filter(Boolean).slice(0, 10);
+  for(const line of lines){
+    const letters = (line.match(/[A-Za-z]/g) || []).length;
+    const digits = (line.match(/\d/g) || []).length;
+    if(letters < 3 || digits > letters || junk.test(line) || /@/.test(line)) continue;
+    const cleaned = line.replace(/[^A-Za-z0-9 &'\-\.]/g, ' ').replace(/\s+/g,' ').trim();
+    if(cleaned.length < 3) continue;
+    return { vendor: cleaned === cleaned.toUpperCase() ? toTitleCase(cleaned) : cleaned, fromMerchant: false };
+  }
+  return null;
+}
+function parseReceiptText(text, merchants, today){
+  return {
+    vendor: parseReceiptVendor(text, merchants),
+    date: parseReceiptDate(text, today),
+    amount: parseReceiptAmount(text)
+  };
+}
+
 async function upsertMerchantFromEntry(name, category, paymentMethod){
   if(!name.trim()) return;
   if(findMerchant(name)) return;
@@ -1013,6 +1157,11 @@ function viewAdd(){
   return `
     <div class="card">
       <div class="card-title">New transaction</div>
+      <div id="ocr-wrap" style="margin-bottom:14px;">
+        <label for="receipt-camera" class="btn secondary" id="ocr-btn" style="display:block;text-align:center;margin:0;cursor:pointer;">&#128247; Scan receipt</label>
+        <input type="file" id="receipt-camera" accept="image/*" capture="environment" style="display:none;">
+        <div id="ocr-status" class="helptext" style="margin-top:8px;"></div>
+      </div>
       <form id="add-form">
         <label for="f-date">Date</label>
         <input type="date" id="f-date" value="${todayStr()}" required>
@@ -1963,6 +2112,61 @@ function attachHandlers(){
     });
   }
   if(currentView === 'add'){
+    document.getElementById('receipt-camera')?.addEventListener('change', async (event)=>{
+      const input = event.target;
+      const file = input.files && input.files[0];
+      if(!file) return;
+      const status = document.getElementById('ocr-status');
+      const btn = document.getElementById('ocr-btn');
+      const setStatus = (msg, isErr) => { status.textContent = msg; status.style.color = isErr ? 'var(--alert)' : ''; };
+      if(btn) btn.style.opacity = '0.6';
+      try{
+        setStatus('Preparing photo…');
+        let image = file;
+        try{ image = await compressReceiptImage(file); }catch(e){ /* fall back to the original photo */ }
+
+        setStatus('Loading text reader… (first scan needs internet)');
+        const T = await loadTesseract();
+        setStatus('Reading receipt… 0%');
+        const result = await T.recognize(image, 'eng', {
+          logger: m => { if(m.status === 'recognizing text') setStatus('Reading receipt… ' + Math.round(m.progress * 100) + '%'); }
+        });
+        const parsed = parseReceiptText(result.data.text || '', state.merchants, todayStr());
+
+        const fill = (id, value) => {
+          const el = document.getElementById(id);
+          if(!el) return;
+          el.value = value;
+          el.classList.remove('field-error');
+          el.classList.add('ocr-filled');
+          const msg = document.getElementById(id + '-error'); if(msg) msg.textContent = '';
+          el.addEventListener('input', ()=> el.classList.remove('ocr-filled'), { once:true });
+          setTimeout(()=> el.classList.remove('ocr-filled'), 6000);
+        };
+        const got = [];
+        const missing = [];
+        if(parsed.vendor){ fill('f-vendor', parsed.vendor.vendor); got.push('vendor'); } else missing.push('vendor');
+        if(parsed.date){ fill('f-date', parsed.date); got.push('date'); } else missing.push('date');
+        if(parsed.amount){ fill('f-amount', parsed.amount.amount.toFixed(2)); got.push('amount'); } else missing.push('amount');
+
+        if(!got.length){
+          setStatus('Couldn\u2019t read anything useful — try again with the receipt flat, in good light, or enter it manually.', true);
+        } else {
+          let msg = 'Filled in ' + got.join(', ') + ' — check before saving.';
+          if(missing.length) msg += ' Couldn\u2019t find the ' + missing.join(' or ') + '.';
+          if(parsed.amount && !parsed.amount.fromTotalLine) msg += ' No TOTAL line found, so the amount is the largest figure on the receipt.';
+          setStatus(msg);
+        }
+      }catch(err){
+        console.error('Receipt scan failed:', err);
+        setStatus(navigator.onLine === false
+          ? 'You\u2019re offline — scanning needs internet the first time. Enter it manually for now.'
+          : 'Couldn\u2019t scan that photo. Please enter the details manually.', true);
+      }finally{
+        if(btn) btn.style.opacity = '';
+        input.value = '';   // lets the same photo be chosen again
+      }
+    });
     ['f-date','f-vendor','f-amount'].forEach(id=>{
       const el = document.getElementById(id);
       el?.addEventListener('input', ()=>{
@@ -1975,6 +2179,8 @@ function attachHandlers(){
         document.querySelectorAll('#f-type-group .pill').forEach(x=>x.classList.remove('active'));
         p.classList.add('active');
         const isTransfer = p.dataset.value === 'transfer';
+        const ocrWrap = document.getElementById('ocr-wrap');
+        if(ocrWrap) ocrWrap.style.display = isTransfer ? 'none' : '';
         const normalSection = document.getElementById('normal-fields-section');
         const transferSection = document.getElementById('transfer-fields-section');
         if(normalSection) normalSection.style.display = isTransfer ? 'none' : 'block';
