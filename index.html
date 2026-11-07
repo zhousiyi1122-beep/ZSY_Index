@@ -173,6 +173,12 @@
   .period-card{border:1px solid var(--line);border-radius:8px;padding:13px;margin-bottom:12px;background:var(--surface-2);}
   .period-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;}
   .period-head .title{font-weight:600;font-size:14px;}
+  .period-card .period-body{display:none;margin-top:10px;}
+  .period-card.open .period-body{display:block;}
+  .period-card .chev{color:var(--ink-dim);transition:transform .15s;display:inline-block;}
+  .period-card.open .chev{transform:rotate(180deg);}
+  .period-tag{font-size:10px;padding:1px 6px;border-radius:8px;margin-left:6px;font-family:'IBM Plex Mono',monospace;background:var(--surface);color:var(--ink-dim);vertical-align:middle;}
+  .period-tag.current{color:var(--accent);}
   .status-badge{font-size:10.5px;padding:3px 8px;border-radius:10px;font-family:'IBM Plex Mono',monospace;}
   .status-badge.closed{background:var(--money-dim);color:var(--money);}
   .status-badge.open{background:#3A331F;color:var(--pending);}
@@ -292,6 +298,8 @@ let editingAccountId = null;
 let editingGiftCardId = null;
 let rechargingGiftCardId = null;
 let helpExpanded = {};
+let reconcileCardId = null;
+let reconcileOpen = {};
 let editingScheduleId = null;
 let logFilterMethod = '';
 let logFilterCategory = '';
@@ -1226,50 +1234,77 @@ function viewReconcile(){
   if(!cards.length){
     return `<div class="card"><div class="empty">No credit cards set up yet. Add one in Settings → Credit cards, then log some transactions against it to reconcile.</div></div>`;
   }
+  if(!reconcileCardId || !cards.find(c=>c.id===reconcileCardId)) reconcileCardId = cards[0].id;
+  const today = todayStr();
+  const unmatchedCount = c => state.transactions.filter(t => t.paymentMethod===c.name && !t.reconciled && t.date<=today).length;
 
-  return cards.map(card=>{
-    const closingDay = card.closingDay || 15;
-    const cardTxns = state.transactions.filter(t => t.paymentMethod === card.name);
-    if(!cardTxns.length){
-      return `
-        <div class="card">
-          <div class="card-title">${escapeHtml(card.name)}</div>
-          <div class="empty">No transactions logged against this card yet.</div>
-        </div>`;
-    }
-    const periods = {};
-    cardTxns.forEach(t=>{
-      const key = periodKeyFor(t.date, closingDay);
-      (periods[key] = periods[key] || []).push(t);
-    });
-    const keys = Object.keys(periods).sort().reverse();
+  // One tab per card — only the selected card's statements are shown, so
+  // the page isn't one long scroll of every card's every period.
+  const tabs = `<div class="pill-group" id="recon-card-tabs" style="margin-bottom:12px;">${cards.map(c=>{
+    const n = unmatchedCount(c);
+    return `<div class="pill recon-card-tab${c.id===reconcileCardId?' active':''}" data-card="${c.id}">${escapeHtml(c.name)} <span class="mono" style="opacity:.75;">${n ? n : '\u2713'}</span></div>`;
+  }).join('')}</div>`;
 
-    const periodsHtml = keys.map(key=>{
-      const txns = periods[key].sort((a,b)=>a.date.localeCompare(b.date));
-      // Shown separately rather than netted — a big payment landing in the
-      // same period as few new charges would otherwise net to a confusing
-      // negative "total" that matches nothing on the real statement. Real
-      // statements show these as separate lines too (New Credits / New
-      // Debits), so this mirrors that instead of combining them.
-      const charges = txns.filter(t=>t.amount>0).reduce((s,t)=>s+t.amount,0);
-      const credits = txns.filter(t=>t.amount<0).reduce((s,t)=>s+Math.abs(t.amount),0);
-      const net = charges - credits;
-      const recCount = txns.filter(t=>t.reconciled).length;
-      const pr = ((state.settings.periods||{})[card.id]||{})[key];
-      const closed = pr && pr.closed;
-      // Carries over an old single-field record (actualTotal) by treating
-      // it as the charges side, so nothing already saved just vanishes.
-      const actualCharges = pr ? (pr.actualCharges !== undefined ? pr.actualCharges : pr.actualTotal) : null;
-      const actualCredits = pr ? pr.actualCredits : null;
-      const pid = card.id + '__' + key;
-      return `
-        <div class="period-card" data-card="${card.id}" data-period="${key}">
-          <div class="period-head">
-            <div class="title">${periodLabel(key)}</div>
-            <div class="status-badge ${closed?'closed':'open'}">${closed?'closed':'open'}</div>
+  const card = cards.find(c=>c.id===reconcileCardId);
+  const closingDay = card.closingDay || 15;
+  const cardTxns = state.transactions.filter(t => t.paymentMethod === card.name);
+  const periods = {};
+  cardTxns.forEach(t=>{
+    const key = periodKeyFor(t.date, closingDay);
+    (periods[key] = periods[key] || []).push(t);
+  });
+  const keys = Object.keys(periods).sort().reverse();
+  const currentKey = periodKeyFor(today, closingDay);
+  const cardPeriods = (state.settings.periods||{})[card.id] || {};
+  const openPeriodCount = keys.filter(k => !(cardPeriods[k] && cardPeriods[k].closed)).length;
+
+  const summary = `
+    <div class="card" style="padding:14px;">
+      <div class="card-title">${escapeHtml(card.name)}</div>
+      <div style="display:flex;gap:22px;flex-wrap:wrap;">
+        <div><div class="mono" style="font-size:18px;font-weight:600;">${fmtMoney(cardBalance(card))}</div><div class="helptext" style="margin-top:2px;">balance owed</div></div>
+        <div><div class="mono" style="font-size:18px;font-weight:600;">${unmatchedCount(card)}</div><div class="helptext" style="margin-top:2px;">unmatched</div></div>
+        <div><div class="mono" style="font-size:18px;font-weight:600;">${openPeriodCount}</div><div class="helptext" style="margin-top:2px;">statements open</div></div>
+      </div>
+    </div>`;
+
+  if(!cardTxns.length){
+    return tabs + summary + `<div class="card"><div class="empty">No transactions logged against this card yet.</div></div>`;
+  }
+
+  const defaultOpenKey = keys.includes(currentKey) ? currentKey : keys[0];
+
+  const periodsHtml = keys.map(key=>{
+    const txns = periods[key].sort((a,b)=>a.date.localeCompare(b.date));
+    // Shown separately rather than netted — real statements list New
+    // Credits and New Debits as separate lines, and netting them can swing
+    // negative and match nothing on the statement.
+    const charges = txns.filter(t=>t.amount>0).reduce((s,t)=>s+t.amount,0);
+    const credits = txns.filter(t=>t.amount<0).reduce((s,t)=>s+Math.abs(t.amount),0);
+    const net = charges - credits;
+    const recCount = txns.filter(t=>t.reconciled).length;
+    const pr = cardPeriods[key];
+    const closed = pr && pr.closed;
+    // Carries over an old single-field record (actualTotal) as the charges side.
+    const actualCharges = pr ? (pr.actualCharges !== undefined ? pr.actualCharges : pr.actualTotal) : null;
+    const actualCredits = pr ? pr.actualCredits : null;
+    const pid = card.id + '__' + key;
+    const isOpen = reconcileOpen[pid] !== undefined ? reconcileOpen[pid] : (key === defaultOpenKey);
+    const tag = key === currentKey ? '<span class="period-tag current">current</span>' : key > currentKey ? '<span class="period-tag">upcoming</span>' : '';
+    return `
+      <div class="period-card${isOpen?' open':''}" data-card="${card.id}" data-period="${key}">
+        <div class="period-head period-toggle" role="button" style="cursor:pointer;margin-bottom:0;">
+          <div>
+            <div class="title">${periodLabel(key)}${tag}</div>
+            <div class="helptext" style="margin-top:3px;">${recCount}/${txns.length} matched \u00b7 net ${fmtMoney(net)}</div>
           </div>
-          <div class="helptext">${recCount}/${txns.length} matched</div>
-          <div class="helptext" style="margin-top:4px;">${fmtMoney(charges)} new charges${credits>0.001?` \u00b7 ${fmtMoney(credits)} new credits`:''} \u00b7 net ${fmtMoney(net)}</div>
+          <div style="display:flex;align-items:center;gap:8px;">
+            <div class="status-badge ${closed?'closed':'open'}">${closed?'closed':'open'}</div>
+            <span class="chev">&#9662;</span>
+          </div>
+        </div>
+        <div class="period-body">
+          <div class="helptext">${fmtMoney(charges)} new charges${credits>0.001?` \u00b7 ${fmtMoney(credits)} new credits`:''}</div>
           ${txns.map(t=>`
             <div class="recon-row">
               <input type="checkbox" class="recon-check" data-id="${t.id}" ${t.reconciled?'checked':''}>
@@ -1291,14 +1326,11 @@ function viewReconcile(){
               ${pr ? `<button type="button" class="btn secondary clear-period-btn" style="margin-top:0;" data-card="${card.id}" data-period="${key}">Clear record</button>` : ''}
             </div>
           </div>
-        </div>`;
-    }).join('');
-
-    return `
-      <div class="card-title" style="margin:4px 0 -2px 2px;">${escapeHtml(card.name)}</div>
-      ${periodsHtml}
-    `;
+        </div>
+      </div>`;
   }).join('');
+
+  return tabs + summary + `<div class="card-title" style="margin:4px 0 8px 2px;">Statements</div>` + periodsHtml;
 }
 
 function updateVarianceDisplay(cardId, key){
@@ -2192,6 +2224,19 @@ function attachHandlers(){
   }
 
   if(currentView === 'reconcile'){
+    document.querySelectorAll('.recon-card-tab').forEach(tab=>{
+      tab.addEventListener('click', ()=>{ reconcileCardId = tab.dataset.card; render(); });
+    });
+    // Expand/collapse in place (no re-render) so figures typed into a
+    // statement's fields aren't wiped by opening or closing another one.
+    document.querySelectorAll('.period-toggle').forEach(head=>{
+      head.addEventListener('click', ()=>{
+        const pc = head.closest('.period-card');
+        const open = !pc.classList.contains('open');
+        pc.classList.toggle('open', open);
+        reconcileOpen[pc.dataset.card + '__' + pc.dataset.period] = open;
+      });
+    });
     document.querySelectorAll('.recon-edit-btn').forEach(btn=>{
       btn.addEventListener('click', ()=>{
         try{
