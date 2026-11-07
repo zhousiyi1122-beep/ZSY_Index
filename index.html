@@ -291,6 +291,7 @@ let editingCardId = null;
 let editingAccountId = null;
 let editingGiftCardId = null;
 let rechargingGiftCardId = null;
+let helpExpanded = {};
 let editingScheduleId = null;
 let logFilterMethod = '';
 let logFilterCategory = '';
@@ -1490,7 +1491,7 @@ function settingsSectionCards(){
   return `
     <div class="card">
       <div class="card-title">Credit cards</div>
-      <div class="helptext" style="margin-bottom:10px;">Each card gets its own closing date, credit limit, opening balance, and reconciliation periods. A card's name doubles as its payment method — pick it in Add/Edit just like Cash or Afterpay. Balance owed goes up with charges and down with payments (e.g. a Transfer money payoff).</div>
+      ${collapsibleHelp('settingsSectionCards', `Each card gets its own closing date, credit limit, opening balance, and reconciliation periods.`, `A card's name doubles as its payment method — pick it in Add/Edit just like Cash or Afterpay. Balance owed goes up with charges and down with payments (e.g. a Transfer you add to pay it off).`)}
       ${getCards().length ? getCards().map(c=> c.id===editingCardId ? `
         <div class="list-row" style="display:block;padding-bottom:14px;">
           <label for="ecard-name-${c.id}">Card name</label>
@@ -1541,7 +1542,7 @@ function settingsSectionGiftCards(){
   return `
     <div class="card">
       <div class="card-title">Gift cards</div>
-      <div class="helptext" style="margin-bottom:10px;">Loading a gift card charges the source you pick but doesn't count as spend yet — it's filed under "${GIFT_CARD_LOAD_CATEGORY}". When you actually redeem it, pick the gift card as the payment method on a normal transaction with the real category — that's when it counts as an expense.</div>
+      ${collapsibleHelp('settingsSectionGiftCards', `Loading a gift card charges the source you pick but doesn't count as spend yet.`, `It's filed under "${GIFT_CARD_LOAD_CATEGORY}". When you actually redeem it, pick the gift card as the payment method on a normal transaction with the real category — that's when it counts as an expense.`)}
       ${getGiftCards().length ? getGiftCards().map(g=> g.id===editingGiftCardId ? `
         <div class="list-row" style="display:block;padding-bottom:14px;">
           <label for="egc-name-${g.id}">Gift card name</label>
@@ -1608,7 +1609,7 @@ function settingsSectionNonMonetary(){
   return `
     <div class="card">
       <div class="card-title">Non-monetary funding sources</div>
-      <div class="helptext" style="margin-bottom:10px;">For gift cards you got without spending real money — loyalty points redeemed, a merchant promotion, a freebie. These show up as a separate group when picking a gift card's funding source, never appear as a normal payment method anywhere else in the app, and loading a gift card this way is left out of the Dashboard's spend widgets since nothing was actually spent.</div>
+      ${collapsibleHelp('settingsSectionNonMonetary', `For gift cards you got without spending real money — loyalty points redeemed, a merchant promotion, a freebie.`, `These show up as a separate group when picking a gift card's funding source, never appear as a normal payment method anywhere else in the app, and loading a gift card this way is left out of the Dashboard's spend widgets since nothing was actually spent.`)}
       ${list.length ? list.map(m=> m===editingNonMonetary ? `
         <div class="list-row" style="display:block;padding-bottom:14px;">
           <input type="text" id="enm-input" value="${escapeHtml(m)}">
@@ -1682,7 +1683,7 @@ function settingsSectionCategories(){
   return `
     <div class="card">
       <div class="card-title">Categories</div>
-      <div class="helptext" style="margin-bottom:10px;">Categories marked "system" can be deleted (with a warning) but not renamed — Afterpay, Transfers, and Gift Cards rely on their exact name internally, and a rename would silently break how they're tracked. Tag each category as Expense or Income so the Add form only shows relevant ones once you've picked a type.</div>
+      ${collapsibleHelp('settingsSectionCategories', `Tag each category as Expense or Income so the Add form only shows relevant ones once you've picked a type.`, `Categories marked "system" can be deleted (with a warning) but not renamed — Afterpay, Transfers, and Gift Cards rely on their exact name internally, and a rename would silently break how they're tracked.`)}
       ${(s.categories||[]).map(c=> c===editingCategory ? `
         <div class="list-row" style="display:block;padding-bottom:14px;">
           <input type="text" id="ec-input" value="${escapeHtml(c)}">
@@ -1750,6 +1751,12 @@ function settingsSectionMethods(){
   `;
 }
 
+// Long intro blurbs on the Settings pages eat a lot of phone screen, so
+// show the key sentence and tuck the rest behind a Show more / Show less link.
+function collapsibleHelp(key, shortHtml, moreHtml){
+  const open = !!helpExpanded[key];
+  return `<div class="helptext" style="margin-bottom:10px;">${shortHtml}${open ? ' ' + moreHtml : ''} <a href="#" data-help-toggle="${key}" style="color:var(--accent);white-space:nowrap;">${open ? 'Show less' : 'Show more'}</a></div>`;
+}
 // Older schedules have no explicit type — expense/income is inferred from
 // the amount's sign, same as before. Transfers are always explicit.
 function scheduleType(sc){
@@ -1765,7 +1772,7 @@ function settingsSectionSchedules(){
   return `
     <div class="card">
       <div class="card-title">Scheduled payments</div>
-      <div class="helptext" style="margin-bottom:10px;">"Auto-log" schedules record themselves on their due date, catching up on anything missed since you last opened the app. "Confirm each time" schedules wait instead — they show up as due on the Dashboard until you tap Confirm, so you get one-tap logging without re-typing the whole entry, and a chance to adjust the amount if it varies (a utility bill, say). Works for recurring income and recurring transfers too — wages, interest, a regular payment toward a card. For true background automation of auto-log schedules even when the app's closed, open <code>Code.gs</code> in the Apps Script editor, select <code>createDailyScheduleTrigger</code> in the function dropdown, and click Run once (one-time authorization).</div>
+      ${collapsibleHelp('settingsSectionSchedules', `"Auto-log" schedules record themselves on their due date; "Confirm each time" ones wait on the Dashboard until you tap Confirm.`, `Auto-log catches up on anything missed since you last opened the app. Confirm each time gives one-tap logging without re-typing the entry, and a chance to adjust the amount if it varies (a utility bill, say). Works for recurring income and recurring transfers too — wages, interest, a regular payment toward a card. For true background automation of auto-log schedules even when the app's closed, open <code>Code.gs</code> in the Apps Script editor, select <code>createDailyScheduleTrigger</code> in the function dropdown, and click Run once (one-time authorization).`)}
       ${getSchedules().length ? getSchedules().map(sc=>{
         const type = scheduleType(sc);
         return sc.id===editingScheduleId ? `
@@ -2731,6 +2738,14 @@ function attachHandlers(){
       if(transferEl) transferEl.style.display = isTransfer ? 'block' : 'none';
       if(!isTransfer) rebuildCategorySelect(categoryEl, type);
     };
+    document.querySelectorAll('[data-help-toggle]').forEach(a=>{
+      a.addEventListener('click', (e)=>{
+        e.preventDefault();
+        const k = a.dataset.helpToggle;
+        helpExpanded[k] = !helpExpanded[k];
+        render();
+      });
+    });
     document.querySelectorAll('#ns-type-group .pill').forEach(p=>{
       p.addEventListener('click', ()=>{
         document.querySelectorAll('#ns-type-group .pill').forEach(x=>x.classList.remove('active'));
