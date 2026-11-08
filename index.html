@@ -146,6 +146,15 @@
   .helptext{font-size:11.5px;color:var(--ink-dim);margin-top:6px;line-height:1.4;}
   .field-error{border-color:var(--alert) !important;box-shadow:0 0 0 1px var(--alert);}
   .ocr-filled{box-shadow:0 0 0 2px var(--accent) !important;}
+  .items-box{border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin-bottom:14px;background:var(--surface-2);}
+  .items-box summary{cursor:pointer;font-size:13.5px;font-weight:600;}
+  .items-box summary .ok{color:var(--money);}
+  .items-box summary .bad{color:var(--pending);}
+  .item-row{display:flex;gap:6px;align-items:center;margin-top:8px;}
+  .item-row input{margin:0;padding:8px 6px;font-size:14px;width:auto;}
+  .item-row .item-qty{flex:0 0 44px;width:44px;text-align:center;}
+  .item-row .item-name{flex:1 1 auto;min-width:0;}
+  .item-row .item-price{flex:0 0 82px;width:82px;text-align:right;}
   .field-error-msg{font-size:11.5px;color:var(--alert);margin-top:4px;line-height:1.4;}
 
   .txn-item{
@@ -301,6 +310,9 @@ let rechargingGiftCardId = null;
 let helpExpanded = {};
 let reconcileCardId = null;
 let reconcileOpen = {};
+let addItemsRef = { list: [] };
+let editItemsRef = { list: [] };
+const ITEMS_EDITORS = {};
 let editingScheduleId = null;
 let logFilterMethod = '';
 let logFilterCategory = '';
@@ -882,6 +894,147 @@ function parseReceiptText(text, merchants, today){
   };
 }
 
+/* ============ Receipt line items ============ */
+// Items are stored per transaction as [{n: name, q: qty, p: line price}].
+function cleanItems(list){
+  return (list || [])
+    .map(i => ({ n: String(i.n || '').trim().slice(0,80), q: Math.max(1, Math.round(Number(i.q)) || 1), p: Math.round((Number(i.p) || 0) * 100) / 100 }))
+    .filter(i => i.n);
+}
+function smartTitle(s){
+  // Receipts shout in capitals. Tidy plain words, leave tokens with digits
+  // ("2L", "650G") alone.
+  return s.split(' ').map(w => /\d/.test(w) ? w : (w === w.toUpperCase() ? w.charAt(0) + w.slice(1).toLowerCase() : w)).join(' ');
+}
+// Pulls line items out of the OCR text. Anything it gets wrong can be fixed
+// by hand afterwards — the items-vs-total check flags when something's off.
+function parseReceiptItems(text, total){
+  const priceRe = /^(.*?)\s+\$?\s*(-?\d{1,3}(?:,\d{3})*\.\d{2}|-?\d+\.\d{2})(-?)\s*[A-Za-z*#]{0,3}\s*$/;
+  const skip = /\b(sub\s*-?\s*total|total|gst|tax|change|cash|eftpos|visa|mastercard|master\s*card|amex|american\s+express|debit|credit|round(?:ing)?|tendered|received|balance|amount\s+due|savings|points|abn|tel|phone|invoice|thank|approved|terminal|merchant|surcharge)\b|www\.|\.com/i;
+  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+  // Items sit above the TOTAL line; stop there so payment details are ignored.
+  let end = lines.findIndex(l => /\btotal\b/i.test(l) && !/sub\s*-?\s*total|saving/i.test(l));
+  if(end < 0) end = lines.length;
+  const region = lines.slice(0, end);
+  const items = [];
+  let pending = null;
+  for(const line of region){
+    const m = line.match(priceRe);
+    if(!m){
+      const letters = (line.match(/[A-Za-z]/g) || []).length;
+      const digits = (line.match(/\d/g) || []).length;
+      pending = (letters >= 3 && digits <= letters && !skip.test(line)) ? line.replace(/[^A-Za-z0-9 &'\-\.\/%]/g,' ').replace(/\s+/g,' ').trim() : null;
+      continue;
+    }
+    if(skip.test(line)){ pending = null; continue; }
+    let namePart = m[1].trim();
+    let price = parseFloat(m[2].replace(/,/g,''));
+    if(m[3] === '-' && price > 0) price = -price;
+    // A detail line ("0.512 kg NET @ $3.90/kg" or "2 @ $3.00") belongs to the
+    // product named on the line above it.
+    const lettersLeft = namePart.replace(/\b(kg|g|ea|net|x|per|lb|each)\b/gi,'').replace(/[^A-Za-z]/g,'');
+    if(lettersLeft.length < 2 && /\d/.test(namePart)){
+      if(!pending){ continue; }
+      let q = 1, name = pending;
+      const mult = namePart.match(/^(\d+)\s*[xX@]/);
+      const weight = namePart.match(/^(\d+(?:\.\d+)?)\s*(kg|g)\b/i);
+      if(mult) q = parseInt(mult[1], 10);
+      else if(weight) name += ' (' + weight[1] + weight[2].toLowerCase() + ')';
+      items.push({ n: smartTitle(name), q, p: price });
+      pending = null;
+      continue;
+    }
+    let q = 1;
+    const lead = namePart.match(/^(\d+)\s*[xX@]\s*(.*)$/);
+    if(lead && lead[2]){ q = parseInt(lead[1], 10); namePart = lead[2]; }
+    namePart = namePart.replace(/^\d{4,}\s+/, '').replace(/[^A-Za-z0-9 &'\-\.\/%]/g,' ').replace(/\s+/g,' ').trim();
+    if(!namePart) namePart = price < 0 ? 'Discount' : '';
+    if(!namePart || (namePart.match(/[A-Za-z]/g) || []).length < 2){ pending = null; continue; }
+    items.push({ n: smartTitle(namePart), q, p: price });
+    pending = null;
+  }
+  const sum = Math.round(items.reduce((s,i) => s + i.p, 0) * 100) / 100;
+  const matches = total != null && Math.abs(sum - total) < 0.015;
+  return { items, sum, matches };
+}
+
+// Editable items list. `prefix` namespaces the element ids ('ai' = Add form,
+// 'ei' = Edit form) and `ref.list` is the live array being edited.
+function itemsEditorHtml(prefix, hidden){
+  return `
+    <details id="${prefix}-details" class="items-box" style="${hidden?'display:none;':''}">
+      <summary id="${prefix}-summary"></summary>
+      <div id="${prefix}-list"></div>
+      <button type="button" class="btn secondary" id="${prefix}-add" style="margin-top:10px;">+ Add line</button>
+      <div id="${prefix}-footer" class="helptext" style="margin-top:8px;"></div>
+    </details>`;
+}
+function mountItemsEditor(prefix, ref, amountInputId){
+  const details = document.getElementById(prefix + '-details');
+  if(!details) return;
+  const listEl = document.getElementById(prefix + '-list');
+  const amountEl = document.getElementById(amountInputId);
+
+  const updateSummary = ()=>{
+    const items = cleanItems(ref.list);
+    const sum = Math.round(items.reduce((s,i)=>s+i.p,0) * 100) / 100;
+    const amount = amountEl ? Math.abs(parseFloat(amountEl.value)) : NaN;
+    const summary = document.getElementById(prefix + '-summary');
+    const footer = document.getElementById(prefix + '-footer');
+    if(!items.length){
+      summary.innerHTML = `&#129534; Items (0)`;
+      footer.textContent = 'No items yet \u2014 tap + Add line.';
+      return;
+    }
+    if(isNaN(amount)){
+      summary.innerHTML = `&#129534; Items (${items.length}) \u00b7 ${fmtMoney(sum)}`;
+      footer.textContent = '';
+      return;
+    }
+    const diff = Math.round((sum - amount) * 100) / 100;
+    if(Math.abs(diff) < 0.015){
+      summary.innerHTML = `&#129534; Items (${items.length}) \u00b7 ${fmtMoney(sum)} <span class="ok">\u2713 matches</span>`;
+      footer.textContent = 'Items add up to the transaction amount.';
+    } else {
+      summary.innerHTML = `&#129534; Items (${items.length}) \u00b7 ${fmtMoney(sum)} <span class="bad">\u2260 ${fmtMoney(amount)}</span>`;
+      footer.textContent = `Items total ${fmtMoney(sum)} \u2014 ${fmtMoney(Math.abs(diff))} ${diff < 0 ? 'less' : 'more'} than the amount. A line may be missing or misread.`;
+    }
+  };
+  const renderRows = ()=>{
+    listEl.innerHTML = ref.list.map((it,i)=>`
+      <div class="item-row">
+        <input type="number" class="item-qty" data-i="${i}" min="1" step="1" inputmode="numeric" value="${it.q||1}" aria-label="Quantity">
+        <input type="text" class="item-name" data-i="${i}" value="${escapeHtml(it.n||'')}" placeholder="Item" aria-label="Item name">
+        <input type="number" class="item-price mono" data-i="${i}" step="0.01" inputmode="decimal" value="${it.p}" aria-label="Line price">
+        <button type="button" class="x-btn item-del" data-i="${i}" aria-label="Remove line">&times;</button>
+      </div>`).join('');
+    updateSummary();
+  };
+  listEl.addEventListener('input', (e)=>{
+    const i = parseInt(e.target.dataset.i, 10);
+    if(isNaN(i) || !ref.list[i]) return;
+    if(e.target.classList.contains('item-name')) ref.list[i].n = e.target.value;
+    else if(e.target.classList.contains('item-qty')) ref.list[i].q = parseInt(e.target.value, 10) || 1;
+    else if(e.target.classList.contains('item-price')) ref.list[i].p = parseFloat(e.target.value) || 0;
+    updateSummary();
+  });
+  listEl.addEventListener('click', (e)=>{
+    const del = e.target.closest('.item-del');
+    if(!del) return;
+    ref.list.splice(parseInt(del.dataset.i, 10), 1);
+    renderRows();
+  });
+  document.getElementById(prefix + '-add').addEventListener('click', ()=>{
+    ref.list.push({ n:'', q:1, p:0 });
+    renderRows();
+    const names = listEl.querySelectorAll('.item-name');
+    if(names.length) names[names.length-1].focus();
+  });
+  if(amountEl) amountEl.addEventListener('input', updateSummary);
+  ITEMS_EDITORS[prefix] = { refresh: renderRows };
+  renderRows();
+}
+
 async function upsertMerchantFromEntry(name, category, paymentMethod){
   if(!name.trim()) return;
   if(findMerchant(name)) return;
@@ -1148,6 +1301,7 @@ function viewDashboard(){
 
 /* ============ Add Transaction ============ */
 function viewAdd(){
+  addItemsRef.list = [];   // a fresh form starts with no scanned items
   const cats = manualCategoryOptions();
   const methods = allPaymentMethodOptions();
   const cards = getCards();
@@ -1162,6 +1316,7 @@ function viewAdd(){
         <input type="file" id="receipt-camera" accept="image/*" capture="environment" style="display:none;">
         <div id="ocr-status" class="helptext" style="margin-top:8px;"></div>
       </div>
+      ${itemsEditorHtml('ai', true)}
       <form id="add-form">
         <label for="f-date">Date</label>
         <input type="date" id="f-date" value="${todayStr()}" required>
@@ -1288,7 +1443,7 @@ function viewLog(){
       <div class="txn-item" data-id="${t.id}">
         <div class="txn-left">
           <div class="vendor">${escapeHtml(t.vendor)}</div>
-          <div class="meta"><span class="tag">${escapeHtml(t.paymentMethod)}</span><span class="tag">${escapeHtml(t.category)}</span>${afterpayTag(t)}${scheduledTag(t.notes)}${giftCardTag(t)}${incomeTag(t)}</div>
+          <div class="meta"><span class="tag">${escapeHtml(t.paymentMethod)}</span><span class="tag">${escapeHtml(t.category)}</span>${afterpayTag(t)}${scheduledTag(t.notes)}${giftCardTag(t)}${incomeTag(t)}${t.items && t.items.length ? `<span class="tag">&#129534; ${t.items.length} item${t.items.length===1?'':'s'}</span>` : ''}</div>
         </div>
         <div class="txn-right">
           <div class="amt">${txnAmountHtml(t)}</div>
@@ -1304,6 +1459,7 @@ function viewLog(){
 function viewEditTxn(id){
   const t = state.transactions.find(x=>String(x.id)===String(id));
   if(!t) return `<div class="card"><div class="empty">Transaction not found.</div></div>`;
+  editItemsRef.list = (t.items || []).map(i => ({ ...i }));
   const cats = manualCategoryOptions();
   // If this transaction already carries a system category (from a transfer
   // or gift card load), keep it selectable here even though it's hidden
@@ -1362,6 +1518,8 @@ function viewEditTxn(id){
             return `<div class="pill${c===t.category?' active':''}" data-value="${escapeHtml(c)}" data-cat-type="${ct}" style="display:${show?'':'none'};">${escapeHtml(c)}</div>`;
           }).join('')}
         </div>
+
+        ${SYSTEM_CATEGORIES.includes(t.category) ? '' : itemsEditorHtml('ei', false)}
 
         <label for="ef-notes">Notes</label>
         <textarea id="ef-notes" rows="2">${escapeHtml(t.notes||'')}</textarea>
@@ -2112,6 +2270,7 @@ function attachHandlers(){
     });
   }
   if(currentView === 'add'){
+    mountItemsEditor('ai', addItemsRef, 'f-amount');
     document.getElementById('receipt-camera')?.addEventListener('change', async (event)=>{
       const input = event.target;
       const file = input.files && input.files[0];
@@ -2143,6 +2302,17 @@ function attachHandlers(){
           el.addEventListener('input', ()=> el.classList.remove('ocr-filled'), { once:true });
           setTimeout(()=> el.classList.remove('ocr-filled'), 6000);
         };
+        // Line items — read after the amount so they can be checked against it.
+        const itemResult = parseReceiptItems(result.data.text || '', parsed.amount ? parsed.amount.amount : null);
+        addItemsRef.list = itemResult.items;
+        const aiDetails = document.getElementById('ai-details');
+        if(itemResult.items.length && aiDetails){
+          aiDetails.style.display = '';
+          aiDetails.open = !itemResult.matches;   // open it up when something needs checking
+          ITEMS_EDITORS.ai && ITEMS_EDITORS.ai.refresh();
+        } else if(aiDetails){
+          aiDetails.style.display = 'none';
+        }
         const got = [];
         const missing = [];
         if(parsed.vendor){ fill('f-vendor', parsed.vendor.vendor); got.push('vendor'); } else missing.push('vendor');
@@ -2155,6 +2325,13 @@ function attachHandlers(){
           let msg = 'Filled in ' + got.join(', ') + ' — check before saving.';
           if(missing.length) msg += ' Couldn\u2019t find the ' + missing.join(' or ') + '.';
           if(parsed.amount && !parsed.amount.fromTotalLine) msg += ' No TOTAL line found, so the amount is the largest figure on the receipt.';
+          if(itemResult.items.length){
+            msg += itemResult.matches
+              ? ' Found ' + itemResult.items.length + ' items that add up to the total.'
+              : ' Found ' + itemResult.items.length + ' items, but they don\u2019t add up to the total \u2014 check the list below.';
+          } else {
+            msg += ' Couldn\u2019t pick out individual items.';
+          }
           setStatus(msg);
         }
       }catch(err){
@@ -2181,6 +2358,8 @@ function attachHandlers(){
         const isTransfer = p.dataset.value === 'transfer';
         const ocrWrap = document.getElementById('ocr-wrap');
         if(ocrWrap) ocrWrap.style.display = isTransfer ? 'none' : '';
+        const aiDetails = document.getElementById('ai-details');
+        if(aiDetails) aiDetails.style.display = (isTransfer || !addItemsRef.list.length) ? 'none' : '';
         const normalSection = document.getElementById('normal-fields-section');
         const transferSection = document.getElementById('transfer-fields-section');
         if(normalSection) normalSection.style.display = isTransfer ? 'none' : 'block';
@@ -2347,6 +2526,7 @@ function attachHandlers(){
           // still owing" on the dashboard tracks them shrinking as each one
           // posts.
           const upfront = {
+            items: cleanItems(addItemsRef.list),
             date, vendor, amount, paymentMethod: 'Afterpay', category,
             notes: (notes ? notes + ' \u00b7 ' : '') + `Afterpay purchase \u2014 4 installments of ${fmtMoney(amount/4)} charging to ${cardName} [apg:${groupId}]`,
             reconciled: false
@@ -2365,8 +2545,9 @@ function attachHandlers(){
           await upsertMerchantFromEntry(vendor, category, 'Afterpay');
           showToast('Logged in full \u2014 4 installments will charge your card over 6 weeks');
         } else {
-          const data = await apiPost('addTransaction', { data: { date, vendor, amount, paymentMethod: method, category, notes, reconciled:false } });
-          mergeAddTransaction({ date, vendor, amount, paymentMethod: method, category, notes, reconciled:false }, data.id);
+          const newTxn = { date, vendor, amount, paymentMethod: method, category, notes, reconciled:false, items: cleanItems(addItemsRef.list) };
+          const data = await apiPost('addTransaction', { data: newTxn });
+          mergeAddTransaction(newTxn, data.id);
           await upsertMerchantFromEntry(vendor, category, method);
           showToast('Transaction saved');
         }
@@ -3140,6 +3321,7 @@ function attachHandlers(){
 
 function attachEditHandlers(id){
   try{
+  mountItemsEditor('ei', editItemsRef, 'ef-amount');
   document.getElementById('cancel-edit-btn')?.addEventListener('click', ()=>{
     setView(editReturnView);
   });
@@ -3188,7 +3370,10 @@ function attachEditHandlers(id){
       paymentMethod: document.querySelector('#ef-method-group .pill.active')?.dataset.value || t.paymentMethod,
       category: document.querySelector('#ef-category-group .pill.active')?.dataset.value || t.category,
       notes: document.getElementById('ef-notes').value.trim(),
-      reconciled: t.reconciled
+      reconciled: t.reconciled,
+      // Keep whatever items the transaction had unless the items editor is
+      // on screen (it isn't for transfers/system entries).
+      items: document.getElementById('ei-details') ? cleanItems(editItemsRef.list) : (t.items || [])
     };
     const saveBtn = document.getElementById('save-edit-btn');
     if(saveBtn){ saveBtn.disabled = true; saveBtn.textContent = 'Saving…'; }
