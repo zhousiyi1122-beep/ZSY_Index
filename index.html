@@ -996,6 +996,7 @@ function parseReceiptItems(text, total){
   const priceRe = /^(.*?)\s+(-?)\s*[$S]?\s*(-?)(\d{1,3}(?:,\d{3})*\.\d{2}|\d+\.\d{2})(-?)\s*[A-Za-z*#]{0,3}\s*$/;
   const skip = /\b(sub\s*-?\s*total|total|gst|tax|change|cash|eftpos|eft|visa|mastercard|master\s*card|amex|american\s+express|debit|credit|round(?:ing)?|tendered|received|balance|amount\s+due|savings|points|abn|tel|phone|invoice|thank|approved|terminal|merchant|surcharge)\b|www\.|\.com/i;
   const tidy = s => s.replace(/^[A-Za-z]\s+(?=[A-Za-z0-9])/, '')            // stray OCR letter before the name ("Z Coles ...")
+                     .replace(/^(?=[A-Za-z]{2}\s+[A-Z]{3})(?=\S*[a-z])[A-Za-z]{2}\s+/, '')   // lowercase noise before a CAPS name ("wf COLES ...")
                      .replace(/^\d{4,}\s+/, '')                               // product code
                      .replace(/[^A-Za-z0-9 &'\-\.\/%$]/g,' ').replace(/\s+/g,' ').trim();
   const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
@@ -1010,7 +1011,16 @@ function parseReceiptItems(text, total){
     if(!m){
       // "2 @ $3.30 EACH" printed UNDER an item with no price of its own:
       // it's that item's quantity.
-      const qm = line.match(/^(\d+)\s*[@xX]\s*[$S]?\s*(\d+\.\d{2})\s*(?:each|ea)?\s*$/i);
+      // Preferred: work the quantity out from the unit price ("... $3.30 EACH"
+      // under a 6.60 item = 2), which survives OCR garbling the "2 @" part.
+      const unitM = line.match(/(\d+\.\d{2})/);
+      if(unitM && items.length && /\beach\b|\bea\b|@|\u00a9/i.test(line) && !/total|saving/i.test(line)){
+        const last = items[items.length-1];
+        const u = parseFloat(unitM[1]);
+        const q = u > 0 ? Math.round(last.p / u) : 0;
+        if(last.p > 0 && q >= 2 && Math.abs(q * u - last.p) < 0.025){ last.q = q; pending = null; continue; }
+      }
+      const qm = line.match(/^(\d+)\s*[@xX\u00a9]\s*[$S]?\s*(\d+\.\d{2})\s*(?:each|ea)?\s*$/i);
       if(qm && items.length){ items[items.length-1].q = parseInt(qm[1], 10); pending = null; continue; }
       const letters = (line.match(/[A-Za-z]/g) || []).length;
       const digits = (line.match(/\d/g) || []).length;
@@ -1046,9 +1056,44 @@ function parseReceiptItems(text, total){
     items.push({ n: smartTitle(namePart), q, p: price });
     pending = null;
   }
-  const sum = Math.round(items.reduce((s,i) => s + i.p, 0) * 100) / 100;
+  const round2 = n => Math.round(n * 100) / 100;
+  let sum = round2(items.reduce((s,i) => s + i.p, 0));
+  const flipped = [];
+  // OCR very often drops the tiny minus sign on a discount line ("-$1.60"
+  // read as "$1.60"). The printed total is read independently, so use it as a
+  // checksum: if the items don't add up, look for the smallest set of lines
+  // that must be discounts for them to. Only applied when the answer is
+  // unambiguous (or exactly one candidate looks like a promo line).
+  if(total != null && Math.abs(sum - total) >= 0.015 && items.length <= 20){
+    const promo = /\b\d+\s*F\s*\$|\b\d+\s*for\s*\$|discount|special|saving|\boff\b|promo|coupon|multi|member|offer|\bsave\b/i;
+    const pos = items.map((it, i) => i).filter(i => items[i].p > 0);
+    const combos = [];
+    const choose = (start, k, acc) => {
+      if(k === 0){ combos.push(acc.slice()); return; }
+      for(let i = start; i < pos.length; i++){ acc.push(pos[i]); choose(i + 1, k - 1, acc); acc.pop(); }
+    };
+    let found = null;
+    for(let k = 1; k <= 3 && !found; k++){
+      combos.length = 0; choose(0, k, []);
+      const hits = combos.filter(cb => Math.abs(sum - 2 * cb.reduce((s, i) => s + items[i].p, 0) - total) < 0.015);
+      if(hits.length === 1) found = hits[0];
+      else if(hits.length > 1){
+        const promoHits = hits.filter(cb => cb.every(i => promo.test(items[i].n)));
+        if(promoHits.length === 1) found = promoHits[0];
+        break;   // ambiguous at the smallest size — don't guess
+      }
+    }
+    if(found){
+      found.forEach(i => {
+        items[i].p = -Math.abs(items[i].p);
+        if(!/discount|special|saving|\boff\b|promo|coupon|multi/i.test(items[i].n)) items[i].n = 'Discount: ' + items[i].n;
+        flipped.push(items[i].n);
+      });
+      sum = round2(items.reduce((s,i) => s + i.p, 0));
+    }
+  }
   const matches = total != null && Math.abs(sum - total) < 0.015;
-  return { items, sum, matches };
+  return { items, sum, matches, flipped };
 }
 
 // Editable items list. `prefix` namespaces the element ids ('ai' = Add form,
@@ -2423,7 +2468,7 @@ function attachHandlers(){
           if(parsed.amount && !parsed.amount.fromTotalLine) msg += ' No TOTAL line found, so the amount is the largest figure on the receipt.';
           if(itemResult.items.length){
             msg += itemResult.matches
-              ? ' Found ' + itemResult.items.length + ' items that add up to the total.'
+              ? ' Found ' + itemResult.items.length + ' items that add up to the total.' + (itemResult.flipped && itemResult.flipped.length ? ' (Treated ' + itemResult.flipped.length + ' line' + (itemResult.flipped.length===1?'':'s') + ' as a discount so they match \u2014 the minus sign wasn\u2019t readable.)' : '')
               : ' Found ' + itemResult.items.length + ' items, but they don\u2019t add up to the total \u2014 check the list below.';
           } else {
             msg += ' Couldn\u2019t pick out individual items.';
