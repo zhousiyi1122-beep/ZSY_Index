@@ -861,28 +861,110 @@ function parseReceiptAmount(text){
 function toTitleCase(s){
   return s.toLowerCase().replace(/\b([a-z])/g, (_, ch) => ch.toUpperCase());
 }
-// Use an existing merchant when its name appears anywhere on the receipt
-// (keeps spelling consistent with your merchant list); otherwise fall back
-// to the first line that looks like a shop name rather than an address,
-// ABN, phone number or heading.
-function parseReceiptVendor(text, merchants){
-  const norm = s => ' ' + s.toLowerCase().replace(/[^a-z0-9]+/g,' ').trim() + ' ';
-  const hay = norm(text);
-  let best = null;
+// Retailers common on Australian receipts. Brands from your own merchant
+// list (the first word of each name) are added on top of these.
+const KNOWN_BRANDS = ['Coles','Woolworths','Aldi','IGA','Bunnings','Kmart','Target','Big W','Chemist Warehouse','Priceline','Officeworks','Harris Farm','Costco','Dan Murphy\'s','BWS','Liquorland','7-Eleven','Caltex','Ampol','Shell','United Petroleum','Metro Petroleum','Spotlight','Anaconda','Rebel','JB Hi-Fi','Bing Lee','Myer','David Jones','Uniqlo','Cotton On','Daiso','McDonald\'s','KFC','Hungry Jack\'s','Subway','Domino\'s','Red Rooster','Guzman y Gomez','Oporto','Starbucks','Muffin Break','Reject Shop','Telstra','Optus','Vodafone','Amazon'];
+const BRAND_STOP = ['the','and','mr','mrs','dr','new','special','transfer','recharge','amex','visa','cash'];
+const GENERIC_WORDS = /\b(pty|ltd|limited|australia|aust|supermarkets?|stores?|group|retail|inc|tax|invoice|abn|the)\b/gi;
+
+function normTokens(s){ return s.toLowerCase().replace(/[^a-z0-9]+/g,' ').trim().split(' ').filter(Boolean); }
+function editDistance(a, b){
+  const dp = Array.from({length: a.length + 1}, (_, i) => [i]);
+  for(let j = 1; j <= b.length; j++) dp[0][j] = j;
+  for(let i = 1; i <= a.length; i++)
+    for(let j = 1; j <= b.length; j++)
+      dp[i][j] = Math.min(dp[i-1][j] + 1, dp[i][j-1] + 1, dp[i-1][j-1] + (a[i-1] === b[j-1] ? 0 : 1));
+  return dp[a.length][b.length];
+}
+// Which retailer is this? Earliest brand mentioned on the receipt wins (the
+// header), so a card slip further down saying "AMEX" can't override it.
+// Falls back to a one-letter-slip match ("Coies" -> Coles) if nothing hits.
+function findReceiptBrand(text, merchants){
+  const tokens = normTokens(text);
+  const hay = ' ' + tokens.join(' ') + ' ';
+  const brands = KNOWN_BRANDS.slice();
   (merchants || []).forEach(m=>{
-    const n = norm(m.name);
-    if(n.trim().length >= 3 && hay.includes(n) && (!best || m.name.length > best.length)) best = m.name;
+    const first = (m.name || '').split(/\s+/)[0];
+    if(first && first.replace(/[^A-Za-z]/g,'').length >= 3 && !BRAND_STOP.includes(first.toLowerCase())) brands.push(first);
   });
-  if(best) return { vendor: best, fromMerchant: true };
-  const junk = /^(tax\s*invoice|invoice|receipt|abn|a\.?b\.?n|welcome|thank|tel\b|phone|ph[:.\s]|www|http|store\b|shop\s*\d|date|time|customer|copy|eftpos|order|table|\d)/i;
-  const lines = text.split('\n').map(l => l.trim()).filter(Boolean).slice(0, 10);
+  let best = null;
+  brands.forEach(b=>{
+    const bt = normTokens(b).join(' ');
+    const pos = bt ? hay.indexOf(' ' + bt + ' ') : -1;
+    if(pos >= 0 && (!best || pos < best.pos)) best = { name: b, pos };
+  });
+  if(best) return best.name;
+  brands.forEach(b=>{
+    const bt = normTokens(b).join(' ');
+    if(!bt || bt.includes(' ') || bt.length < 5) return;
+    const t = tokens.find(tok => Math.abs(tok.length - bt.length) <= 1 && editDistance(tok, bt) <= 1);
+    if(t){ const pos = hay.indexOf(' ' + t + ' '); if(!best || pos < best.pos) best = { name: b, pos }; }
+  });
+  return best ? best.name : null;
+}
+// "Store: 761 - CS WEST PENNANT HILL" -> "West Pennant Hill"
+function parseStoreLocation(lines, brand){
   for(const line of lines){
-    const letters = (line.match(/[A-Za-z]/g) || []).length;
-    const digits = (line.match(/\d/g) || []).length;
-    if(letters < 3 || digits > letters || junk.test(line) || /@/.test(line)) continue;
-    const cleaned = line.replace(/[^A-Za-z0-9 &'\-\.]/g, ' ').replace(/\s+/g,' ').trim();
-    if(cleaned.length < 3) continue;
-    return { vendor: cleaned === cleaned.toUpperCase() ? toTitleCase(cleaned) : cleaned, fromMerchant: false };
+    const m = line.match(/^\s*store\s*(?:no\.?|#)?\s*[:\-]\s*(.+)$/i);   // not "Store Manager:"
+    if(!m) continue;
+    let v = m[1].replace(/^\s*\d+\s*[-\u2013:]?\s*/, '').replace(/[^A-Za-z0-9 &'\-]/g,' ');
+    let words = v.split(/\s+/).filter(Boolean);
+    while(words.length > 1 && words[0].length <= 2) words.shift();          // "CS" style prefix codes
+    if(brand) words = words.filter(w => w.toLowerCase() !== brand.toLowerCase());
+    v = words.join(' ').trim();
+    if((v.match(/[A-Za-z]/g) || []).length >= 3 && !/\d/.test(v)) return smartTitle(v);
+  }
+  return null;
+}
+function parseReceiptVendor(text, merchants){
+  const tokens = normTokens(text);
+  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+  const early = new Set(normTokens(lines.slice(0, 6).join(' ')));
+
+  // 1. A merchant you already have: all of its words appear on the receipt
+  //    (so spelling stays consistent). Auto-generated names are ignored, and
+  //    a one-word merchant must be in the header to count.
+  let bestM = null;
+  (merchants || []).forEach(m=>{
+    if(/^(transfer|recharge)\b/i.test(m.name || '')) return;
+    const mt = normTokens(m.name || '');
+    if(!mt.length) return;
+    const ok = mt.length === 1 ? (mt[0].length >= 5 && early.has(mt[0])) : mt.every(t => tokens.includes(t));
+    if(ok && (!bestM || mt.length > bestM.n)) bestM = { name: m.name, n: mt.length };
+  });
+  if(bestM) return { vendor: bestM.name, fromMerchant: true };
+
+  // 2. A known retailer: brand + the store's location line ("Coles West
+  //    Pennant Hill"), or the header line that carries the brand ("Kmart
+  //    Hornsby"), or just the brand.
+  const brand = findReceiptBrand(text, merchants);
+  if(brand){
+    const brandName = (merchants || []).map(m => (m.name||'').split(/\s+/)[0]).find(f => f.toLowerCase() === brand.toLowerCase()) || brand;
+    const loc = parseStoreLocation(lines, brand);
+    if(loc) return { vendor: brandName + ' ' + loc, fromMerchant: false };
+    const bt = normTokens(brand).join(' ');
+    const headerLine = lines.slice(0, 12).find(l => (' ' + normTokens(l).join(' ') + ' ').includes(' ' + bt + ' '));
+    if(headerLine){
+      let cleaned = headerLine.replace(GENERIC_WORDS, ' ').replace(/[^A-Za-z0-9 &'\-]/g,' ').replace(/\s+/g,' ').trim();
+      if(cleaned && !/\d{3,}/.test(cleaned) && cleaned.split(' ').length <= 4 && normTokens(cleaned)[0] === bt.split(' ')[0]){
+        return { vendor: cleaned === cleaned.toUpperCase() ? smartTitle(cleaned) : cleaned, fromMerchant: false };
+      }
+    }
+    return { vendor: brandName, fromMerchant: false };
+  }
+
+  // 3. Last resort: the first top line that looks like a real name. Needs a
+  //    proper word (4+ letters) so logo noise like "wy p" is rejected —
+  //    better to leave the field empty than fill it with rubbish.
+  const junk = /^(tax\s*invoice|invoice|receipt|abn|a\.?b\.?n|welcome|thank|tel\b|phone|ph[:.\s]|www|http|store\b|shop\s*\d|date|time|customer|copy|eftpos|order|table|register|served|cashier|manager|description|qty|item|\d)/i;
+  for(const line of lines.slice(0, 10)){
+    const cleaned = line.replace(GENERIC_WORDS, ' ').replace(/[^A-Za-z0-9 &'\-\.]/g,' ').replace(/\s+/g,' ').trim();
+    const letters = (cleaned.match(/[A-Za-z]/g) || []).length;
+    const digits = (cleaned.match(/\d/g) || []).length;
+    if(junk.test(line) || /@/.test(line) || digits > letters) continue;
+    if(!cleaned.split(' ').some(w => w.replace(/[^A-Za-z]/g,'').length >= 4)) continue;
+    if(letters < cleaned.replace(/\s/g,'').length * 0.65) continue;
+    return { vendor: cleaned === cleaned.toUpperCase() ? smartTitle(cleaned) : cleaned, fromMerchant: false };
   }
   return null;
 }
@@ -909,10 +991,15 @@ function smartTitle(s){
 // Pulls line items out of the OCR text. Anything it gets wrong can be fixed
 // by hand afterwards — the items-vs-total check flags when something's off.
 function parseReceiptItems(text, total){
-  const priceRe = /^(.*?)\s+\$?\s*(-?\d{1,3}(?:,\d{3})*\.\d{2}|-?\d+\.\d{2})(-?)\s*[A-Za-z*#]{0,3}\s*$/;
-  const skip = /\b(sub\s*-?\s*total|total|gst|tax|change|cash|eftpos|visa|mastercard|master\s*card|amex|american\s+express|debit|credit|round(?:ing)?|tendered|received|balance|amount\s+due|savings|points|abn|tel|phone|invoice|thank|approved|terminal|merchant|surcharge)\b|www\.|\.com/i;
+  // Price at the end of a line. Handles "$-1.60", "-$1.60", "1.60-", a "$"
+  // the OCR read as "S", and trailing tax flags like "*".
+  const priceRe = /^(.*?)\s+(-?)\s*[$S]?\s*(-?)(\d{1,3}(?:,\d{3})*\.\d{2}|\d+\.\d{2})(-?)\s*[A-Za-z*#]{0,3}\s*$/;
+  const skip = /\b(sub\s*-?\s*total|total|gst|tax|change|cash|eftpos|eft|visa|mastercard|master\s*card|amex|american\s+express|debit|credit|round(?:ing)?|tendered|received|balance|amount\s+due|savings|points|abn|tel|phone|invoice|thank|approved|terminal|merchant|surcharge)\b|www\.|\.com/i;
+  const tidy = s => s.replace(/^[A-Za-z]\s+(?=[A-Za-z0-9])/, '')            // stray OCR letter before the name ("Z Coles ...")
+                     .replace(/^\d{4,}\s+/, '')                               // product code
+                     .replace(/[^A-Za-z0-9 &'\-\.\/%$]/g,' ').replace(/\s+/g,' ').trim();
   const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
-  // Items sit above the TOTAL line; stop there so payment details are ignored.
+  // Items sit above the first TOTAL line; stop there so payment details are ignored.
   let end = lines.findIndex(l => /\btotal\b/i.test(l) && !/sub\s*-?\s*total|saving/i.test(l));
   if(end < 0) end = lines.length;
   const region = lines.slice(0, end);
@@ -921,17 +1008,21 @@ function parseReceiptItems(text, total){
   for(const line of region){
     const m = line.match(priceRe);
     if(!m){
+      // "2 @ $3.30 EACH" printed UNDER an item with no price of its own:
+      // it's that item's quantity.
+      const qm = line.match(/^(\d+)\s*[@xX]\s*[$S]?\s*(\d+\.\d{2})\s*(?:each|ea)?\s*$/i);
+      if(qm && items.length){ items[items.length-1].q = parseInt(qm[1], 10); pending = null; continue; }
       const letters = (line.match(/[A-Za-z]/g) || []).length;
       const digits = (line.match(/\d/g) || []).length;
-      pending = (letters >= 3 && digits <= letters && !skip.test(line)) ? line.replace(/[^A-Za-z0-9 &'\-\.\/%]/g,' ').replace(/\s+/g,' ').trim() : null;
+      pending = (letters >= 3 && digits <= letters && !skip.test(line)) ? tidy(line) : null;
       continue;
     }
     if(skip.test(line)){ pending = null; continue; }
     let namePart = m[1].trim();
-    let price = parseFloat(m[2].replace(/,/g,''));
-    if(m[3] === '-' && price > 0) price = -price;
-    // A detail line ("0.512 kg NET @ $3.90/kg" or "2 @ $3.00") belongs to the
-    // product named on the line above it.
+    let price = parseFloat(m[4].replace(/,/g,''));
+    if(m[2] === '-' || m[3] === '-' || m[5] === '-') price = -Math.abs(price);
+    // A detail line ("0.512 kg NET @ $3.90/kg" or "2 @ $3.00") that carries
+    // the price belongs to the product named on the line above it.
     const lettersLeft = namePart.replace(/\b(kg|g|ea|net|x|per|lb|each)\b/gi,'').replace(/[^A-Za-z]/g,'');
     if(lettersLeft.length < 2 && /\d/.test(namePart)){
       if(!pending){ continue; }
@@ -947,9 +1038,11 @@ function parseReceiptItems(text, total){
     let q = 1;
     const lead = namePart.match(/^(\d+)\s*[xX@]\s*(.*)$/);
     if(lead && lead[2]){ q = parseInt(lead[1], 10); namePart = lead[2]; }
-    namePart = namePart.replace(/^\d{4,}\s+/, '').replace(/[^A-Za-z0-9 &'\-\.\/%]/g,' ').replace(/\s+/g,' ').trim();
+    namePart = tidy(namePart);
     if(!namePart) namePart = price < 0 ? 'Discount' : '';
     if(!namePart || (namePart.match(/[A-Za-z]/g) || []).length < 2){ pending = null; continue; }
+    // Make discounts obvious in the list.
+    if(price < 0 && !/discount|special|saving|\boff\b|promo|coupon|multi/i.test(namePart)) namePart = 'Discount: ' + namePart;
     items.push({ n: smartTitle(namePart), q, p: price });
     pending = null;
   }
@@ -2309,7 +2402,6 @@ function attachHandlers(){
         if(itemResult.items.length && aiDetails){
           aiDetails.style.display = '';
           aiDetails.open = !itemResult.matches;   // open it up when something needs checking
-          ITEMS_EDITORS.ai && ITEMS_EDITORS.ai.refresh();
         } else if(aiDetails){
           aiDetails.style.display = 'none';
         }
@@ -2318,6 +2410,10 @@ function attachHandlers(){
         if(parsed.vendor){ fill('f-vendor', parsed.vendor.vendor); got.push('vendor'); } else missing.push('vendor');
         if(parsed.date){ fill('f-date', parsed.date); got.push('date'); } else missing.push('date');
         if(parsed.amount){ fill('f-amount', parsed.amount.amount.toFixed(2)); got.push('amount'); } else missing.push('amount');
+
+        // Refresh the items list now that the amount is filled in, so its
+        // "matches / doesn't match" check has something to compare against.
+        if(ITEMS_EDITORS.ai) ITEMS_EDITORS.ai.refresh();
 
         if(!got.length){
           setStatus('Couldn\u2019t read anything useful — try again with the receipt flat, in good light, or enter it manually.', true);
