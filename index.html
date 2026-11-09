@@ -313,6 +313,8 @@ let reconcileOpen = {};
 let addItemsRef = { list: [] };
 let editItemsRef = { list: [] };
 const ITEMS_EDITORS = {};
+let scanSession = { count: 0, text: '' };
+let scanAppend = false;
 let editingScheduleId = null;
 let logFilterMethod = '';
 let logFilterCategory = '';
@@ -1173,6 +1175,40 @@ function mountItemsEditor(prefix, ref, amountInputId){
   renderRows();
 }
 
+// Joins the text of two overlapping receipt photos. Finds where the end of
+// the text so far lines up with the start of the new section (tolerating
+// small OCR differences between the two reads of the overlapped lines), then
+// appends only the new lines. If nothing lines up it just appends and says so.
+function mergeReceiptText(prev, next){
+  const A = prev.split('\n').map(l => l.trim()).filter(Boolean);
+  const B = next.split('\n').map(l => l.trim()).filter(Boolean);
+  const norm = s => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const same = (x, y) => {
+    const a = norm(x), b = norm(y);
+    if(!a || !b) return false;
+    if(a === b) return true;
+    if(Math.min(a.length, b.length) < 5) return false;
+    return editDistance(a, b) <= Math.floor(Math.max(a.length, b.length) * 0.2);
+  };
+  let best = null;
+  for(let i = Math.max(0, A.length - 25); i < A.length; i++){
+    for(let j = 0; j < Math.min(B.length, 20); j++){
+      if(!same(A[i], B[j])) continue;
+      const tail = A.length - i;              // lines of A that should reappear at the top of B
+      if(tail > B.length - j) continue;
+      let matches = 0;
+      for(let t = 0; t < tail; t++) if(same(A[i + t], B[j + t])) matches++;
+      const strong = matches >= 2 || (matches === 1 && norm(A[i]).length >= 8);
+      if(strong && matches >= tail * 0.6){
+        const score = matches * 10 - j;
+        if(!best || score > best.score) best = { i, j, tail, score };
+      }
+    }
+  }
+  if(best) return { text: A.concat(B.slice(best.j + best.tail)).join('\n'), overlap: true };
+  return { text: A.concat(B).join('\n'), overlap: false };
+}
+
 async function upsertMerchantFromEntry(name, category, paymentMethod){
   if(!name.trim()) return;
   if(findMerchant(name)) return;
@@ -1440,6 +1476,8 @@ function viewDashboard(){
 /* ============ Add Transaction ============ */
 function viewAdd(){
   addItemsRef.list = [];   // a fresh form starts with no scanned items
+  scanSession = { count: 0, text: '' };
+  scanAppend = false;
   const cats = manualCategoryOptions();
   const methods = allPaymentMethodOptions();
   const cards = getCards();
@@ -1451,7 +1489,15 @@ function viewAdd(){
       <div class="card-title">New transaction</div>
       <div id="ocr-wrap" style="margin-bottom:14px;">
         <label for="receipt-camera" class="btn secondary" id="ocr-btn" style="display:block;text-align:center;margin:0;cursor:pointer;">&#128247; Scan receipt</label>
+        <div id="ocr-more" style="display:none;margin-top:8px;">
+          <div class="row-flex">
+            <label for="receipt-camera" class="btn" id="ocr-next" style="display:block;text-align:center;margin:0;cursor:pointer;width:auto;flex:2;">&#65291; Next section</label>
+            <button type="button" class="btn secondary" id="ocr-done" style="margin:0;width:auto;flex:1;">Done</button>
+          </div>
+          <div class="helptext" style="margin-top:6px;">Long receipt? Photograph the next part, overlapping the last couple of lines. Each section is joined on. Make any edits after the final section, since adding one re-reads the whole receipt.</div>
+        </div>
         <input type="file" id="receipt-camera" accept="image/*" capture="environment" style="display:none;">
+        <div id="ocr-hint" class="helptext" style="margin-top:8px;">Long receipt? Scan it in overlapping sections, top to bottom \u2014 after the first photo you can add the next part.</div>
         <div id="ocr-status" class="helptext" style="margin-top:8px;"></div>
       </div>
       ${itemsEditorHtml('ai', true)}
@@ -2409,6 +2455,17 @@ function attachHandlers(){
   }
   if(currentView === 'add'){
     mountItemsEditor('ai', addItemsRef, 'f-amount');
+    // "Scan receipt" always starts a fresh scan; "Next section" continues the
+    // current one. Set before the camera opens; read when the photo arrives.
+    document.getElementById('ocr-btn')?.addEventListener('click', ()=>{ scanAppend = false; });
+    document.getElementById('ocr-next')?.addEventListener('click', ()=>{ scanAppend = true; });
+    document.getElementById('ocr-done')?.addEventListener('click', ()=>{
+      scanSession = { count: 0, text: '' };
+      scanAppend = false;
+      document.getElementById('ocr-more').style.display = 'none';
+      document.getElementById('ocr-hint').style.display = '';
+      document.getElementById('ocr-btn').innerHTML = '&#128247; Scan receipt';
+    });
     document.getElementById('receipt-camera')?.addEventListener('change', async (event)=>{
       const input = event.target;
       const file = input.files && input.files[0];
@@ -2417,6 +2474,9 @@ function attachHandlers(){
       const btn = document.getElementById('ocr-btn');
       const setStatus = (msg, isErr) => { status.textContent = msg; status.style.color = isErr ? 'var(--alert)' : ''; };
       if(btn) btn.style.opacity = '0.6';
+      const append = scanAppend && scanSession.count > 0;
+      scanAppend = false;
+      const sectionNo = append ? scanSession.count + 1 : 1;
       try{
         setStatus('Preparing photo…');
         let image = file;
@@ -2424,11 +2484,22 @@ function attachHandlers(){
 
         setStatus('Loading text reader… (first scan needs internet)');
         const T = await loadTesseract();
-        setStatus('Reading receipt… 0%');
+        setStatus('Reading ' + (sectionNo > 1 ? 'section ' + sectionNo : 'receipt') + '… 0%');
         const result = await T.recognize(image, 'eng', {
-          logger: m => { if(m.status === 'recognizing text') setStatus('Reading receipt… ' + Math.round(m.progress * 100) + '%'); }
+          logger: m => { if(m.status === 'recognizing text') setStatus('Reading ' + (sectionNo > 1 ? 'section ' + sectionNo : 'receipt') + '… ' + Math.round(m.progress * 100) + '%'); }
         });
-        const parsed = parseReceiptText(result.data.text || '', state.merchants, todayStr());
+        // Join this section onto what's been read so far, then read the whole
+        // thing as one receipt (vendor/date from the top, total from the end).
+        let fullText = result.data.text || '';
+        let overlapFound = true;
+        if(append){
+          const mr = mergeReceiptText(scanSession.text, fullText);
+          fullText = mr.text;
+          overlapFound = mr.overlap;
+        }
+        scanSession.text = fullText;
+        scanSession.count = sectionNo;
+        const parsed = parseReceiptText(fullText, state.merchants, todayStr());
 
         const fill = (id, value) => {
           const el = document.getElementById(id);
@@ -2441,12 +2512,14 @@ function attachHandlers(){
           setTimeout(()=> el.classList.remove('ocr-filled'), 6000);
         };
         // Line items — read after the amount so they can be checked against it.
-        const itemResult = parseReceiptItems(result.data.text || '', parsed.amount ? parsed.amount.amount : null);
+        const itemResult = parseReceiptItems(fullText, parsed.amount ? parsed.amount.amount : null);
         addItemsRef.list = itemResult.items;
         const aiDetails = document.getElementById('ai-details');
         if(itemResult.items.length && aiDetails){
           aiDetails.style.display = '';
-          aiDetails.open = !itemResult.matches;   // open it up when something needs checking
+          // Open it up when something needs checking — but only once a real TOTAL
+          // line has been read, otherwise a half-scanned receipt always looks wrong.
+          aiDetails.open = (parsed.amount && parsed.amount.fromTotalLine) ? !itemResult.matches : false;
         } else if(aiDetails){
           aiDetails.style.display = 'none';
         }
@@ -2463,17 +2536,26 @@ function attachHandlers(){
         if(!got.length){
           setStatus('Couldn\u2019t read anything useful — try again with the receipt flat, in good light, or enter it manually.', true);
         } else {
-          let msg = 'Filled in ' + got.join(', ') + ' — check before saving.';
+          let msg = (sectionNo > 1 ? 'Section ' + sectionNo + ' added. ' : '') + 'Filled in ' + got.join(', ') + ' — check before saving.';
+          if(append && !overlapFound) msg += ' Couldn\u2019t find where this section overlaps the last one, so lines in between may be missing \u2014 re-scan with more overlap if the items don\u2019t add up.';
           if(missing.length) msg += ' Couldn\u2019t find the ' + missing.join(' or ') + '.';
-          if(parsed.amount && !parsed.amount.fromTotalLine) msg += ' No TOTAL line found, so the amount is the largest figure on the receipt.';
+          if(parsed.amount && !parsed.amount.fromTotalLine) msg += ' No TOTAL line yet, so the amount is just the largest figure so far \u2014 if the receipt continues, tap Next section.';
           if(itemResult.items.length){
             msg += itemResult.matches
               ? ' Found ' + itemResult.items.length + ' items that add up to the total.' + (itemResult.flipped && itemResult.flipped.length ? ' (Treated ' + itemResult.flipped.length + ' line' + (itemResult.flipped.length===1?'':'s') + ' as a discount so they match \u2014 the minus sign wasn\u2019t readable.)' : '')
-              : ' Found ' + itemResult.items.length + ' items, but they don\u2019t add up to the total \u2014 check the list below.';
+              : (parsed.amount && parsed.amount.fromTotalLine
+                  ? ' Found ' + itemResult.items.length + ' items, but they don\u2019t add up to the total \u2014 check the list below.'
+                  : ' Found ' + itemResult.items.length + ' items so far.');
           } else {
             msg += ' Couldn\u2019t pick out individual items.';
           }
           setStatus(msg);
+        }
+        if(scanSession.count > 0){
+          document.getElementById('ocr-more').style.display = '';
+          document.getElementById('ocr-hint').style.display = 'none';
+          document.getElementById('ocr-btn').innerHTML = '&#128260; Start over';
+          document.getElementById('ocr-next').innerHTML = '&#65291; Next section (' + scanSession.count + ' read)';
         }
       }catch(err){
         console.error('Receipt scan failed:', err);
