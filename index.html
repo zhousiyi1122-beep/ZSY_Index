@@ -771,28 +771,175 @@ function loadTesseract(){
   return tesseractLoading;
 }
 
-// Phone photos are several MB; shrinking to ~1200px wide and greying them
-// out makes OCR much faster without hurting legibility.
-function compressReceiptImage(file, maxWidth = 1200, quality = 0.8){
-  return new Promise((resolve, reject)=>{
-    const url = URL.createObjectURL(file);
-    const img = new Image();
-    img.onload = ()=>{
-      try{
-        let w = img.naturalWidth, h = img.naturalHeight;
-        if(w > maxWidth){ h = Math.round(h * maxWidth / w); w = maxWidth; }
-        const canvas = document.createElement('canvas');
-        canvas.width = w; canvas.height = h;
-        const ctx = canvas.getContext('2d');
-        if('filter' in ctx) ctx.filter = 'grayscale(1) contrast(1.25)';
-        ctx.drawImage(img, 0, 0, w, h);
-        canvas.toBlob(b => b ? resolve(b) : reject(new Error('Image conversion failed')), 'image/jpeg', quality);
-      }catch(err){ reject(err); }
-      finally{ URL.revokeObjectURL(url); }
-    };
-    img.onerror = ()=>{ URL.revokeObjectURL(url); reject(new Error('Could not read the photo')); };
-    img.src = url;
-  });
+// ---- Image preparation ----------------------------------------------------
+// OCR accuracy depends mostly on how large and clean the receipt's text is.
+// A phone photo of a receipt is mostly table, so: find the receipt, crop to
+// it, enlarge it, and even out shadows and creases before reading.
+
+// Even out lighting: divide each pixel by the local background brightness so
+// folds, shadows and glare stop swamping the ink. Works on a grey array.
+function flattenIllumination(gray, w, h){
+  const f = 4, sw = Math.max(1, Math.ceil(w / f)), sh = Math.max(1, Math.ceil(h / f));
+  let small = new Float32Array(sw * sh);
+  for(let y = 0; y < sh; y++){
+    for(let x = 0; x < sw; x++){
+      let sum = 0, n = 0;
+      for(let dy = 0; dy < f; dy++){
+        const yy = y * f + dy; if(yy >= h) break;
+        for(let dx = 0; dx < f; dx++){
+          const xx = x * f + dx; if(xx >= w) break;
+          sum += gray[yy * w + xx]; n++;
+        }
+      }
+      small[y * sw + x] = sum / n;
+    }
+  }
+  const r = 12, k = 2 * r + 1;
+  const boxPass = (src, W, H, horizontal) => {
+    const out = new Float32Array(W * H);
+    const len = horizontal ? W : H, lines = horizontal ? H : W;
+    for(let l = 0; l < lines; l++){
+      const at = i => { const j = Math.min(len - 1, Math.max(0, i)); return horizontal ? src[l * W + j] : src[j * W + l]; };
+      let acc = 0;
+      for(let i = -r; i <= r; i++) acc += at(i);
+      for(let i = 0; i < len; i++){
+        const v = acc / k;
+        if(horizontal) out[l * W + i] = v; else out[i * W + l] = v;
+        acc += at(i + r + 1) - at(i - r);
+      }
+    }
+    return out;
+  };
+  const bg = boxPass(boxPass(small, sw, sh, true), sw, sh, false);
+  const out = new Uint8ClampedArray(w * h);
+  for(let y = 0; y < h; y++){
+    const fy = Math.min(sh - 1, y / f), y0 = Math.floor(fy), y1 = Math.min(sh - 1, y0 + 1), ty = fy - y0;
+    for(let x = 0; x < w; x++){
+      const fx = Math.min(sw - 1, x / f), x0 = Math.floor(fx), x1 = Math.min(sw - 1, x0 + 1), tx = fx - x0;
+      const b = (bg[y0 * sw + x0] * (1 - tx) + bg[y0 * sw + x1] * tx) * (1 - ty) + (bg[y1 * sw + x0] * (1 - tx) + bg[y1 * sw + x1] * tx) * ty;
+      let v = gray[y * w + x] / (b + 1) * 235;
+      v = 235 + (v - 235) * 1.3;           // a little extra contrast on the ink
+      out[y * w + x] = v;                  // clamps to 0..255
+    }
+  }
+  return out;
+}
+
+async function loadImageSource(file){
+  if(window.createImageBitmap){
+    try{ const bmp = await createImageBitmap(file, { imageOrientation: 'from-image' }); return { src: bmp, w: bmp.width, h: bmp.height, close: ()=>bmp.close && bmp.close() }; }
+    catch(e){ /* fall through to <img> */ }
+  }
+  const url = URL.createObjectURL(file);
+  try{
+    const img = await new Promise((res, rej)=>{ const i = new Image(); i.onload = ()=>res(i); i.onerror = ()=>rej(new Error('Could not read the photo')); i.src = url; });
+    return { src: img, w: img.naturalWidth, h: img.naturalHeight, close: ()=>{} };
+  } finally { URL.revokeObjectURL(url); }
+}
+function drawRegion(img, sx, sy, sw, sh, outW, outH){
+  const cv = document.createElement('canvas');
+  cv.width = outW; cv.height = outH;
+  const ctx = cv.getContext('2d', { willReadFrequently: true });
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(img.src, sx, sy, sw, sh, 0, 0, outW, outH);
+  return cv;
+}
+function greyscaleInPlace(cv){
+  const ctx = cv.getContext('2d', { willReadFrequently: true });
+  const id = ctx.getImageData(0, 0, cv.width, cv.height), d = id.data;
+  const gray = new Uint8ClampedArray(cv.width * cv.height);
+  for(let i = 0, p = 0; i < d.length; i += 4, p++) gray[p] = 0.299 * d[i] + 0.587 * d[i+1] + 0.114 * d[i+2];
+  return { ctx, id, gray };
+}
+function percentile(sorted, q){ return sorted[Math.min(sorted.length - 1, Math.max(0, Math.floor(sorted.length * q)))]; }
+
+// Where on the photo is the receipt? A quick low-resolution read finds the
+// confidently-readable words; their spread is the receipt. (Judging by pixel
+// darkness alone gets fooled by textured tablecloths and marble.)
+async function locateReceipt(worker, img){
+  const scale = Math.min(1, 800 / img.w);
+  const cw = Math.max(1, Math.round(img.w * scale)), ch = Math.max(1, Math.round(img.h * scale));
+  const cv = drawRegion(img, 0, 0, img.w, img.h, cw, ch);
+  const g = greyscaleInPlace(cv);
+  for(let i = 0, p = 0; i < g.id.data.length; i += 4, p++){ g.id.data[i] = g.id.data[i+1] = g.id.data[i+2] = g.gray[p]; }
+  g.ctx.putImageData(g.id, 0, 0);
+  await worker.setParameters({ tessedit_pageseg_mode: '3' });
+  const { data } = await worker.recognize(cv);
+  const words = (data.words || []).filter(w => w.confidence >= 70 && ((w.text || '').match(/[A-Za-z0-9]/g) || []).length >= 3);
+  if(words.length < 8) return null;
+  const xs0 = words.map(w => w.bbox.x0).sort((a,b)=>a-b), xs1 = words.map(w => w.bbox.x1).sort((a,b)=>a-b);
+  const ys0 = words.map(w => w.bbox.y0).sort((a,b)=>a-b), ys1 = words.map(w => w.bbox.y1).sort((a,b)=>a-b);
+  const x0 = percentile(xs0, 0.03), x1 = percentile(xs1, 0.97), y0 = percentile(ys0, 0.01), y1 = percentile(ys1, 0.99);
+  const padX = (x1 - x0) * 0.12, padY = (y1 - y0) * 0.03;
+  return {
+    x: Math.max(0, (x0 - padX) / scale), y: Math.max(0, (y0 - padY) / scale),
+    x1: Math.min(img.w, (x1 + padX) / scale), y1: Math.min(img.h, (y1 + padY) / scale)
+  };
+}
+
+async function prepareReceiptCanvas(img, worker, setStatus){
+  setStatus('Finding the receipt…');
+  let box = null;
+  try{ box = await locateReceipt(worker, img); }catch(e){ console.warn('Receipt location failed', e); }
+  let sx = 0, sy = 0, sw = img.w, sh = img.h;
+  if(box && (box.x1 - box.x) > img.w * 0.08){ sx = box.x; sy = box.y; sw = box.x1 - box.x; sh = box.y1 - box.y; }
+  else box = null;
+  // The receipt's own width is what matters for legibility — ~1100px is the
+  // sweet spot — and cap the total size so a very long receipt can't exhaust
+  // a phone's memory.
+  let outW = box ? Math.min(1100, Math.round(sw * 1.6)) : Math.min(1600, img.w);
+  let outH = Math.max(1, Math.round(sh * outW / sw));
+  const maxPixels = 8e6;
+  if(outW * outH > maxPixels){ const k = Math.sqrt(maxPixels / (outW * outH)); outW = Math.round(outW * k); outH = Math.round(outH * k); }
+  setStatus('Preparing the image…');
+  const cv = drawRegion(img, sx, sy, sw, sh, outW, outH);
+  const g = greyscaleInPlace(cv);
+  const flat = flattenIllumination(g.gray, outW, outH);
+  for(let i = 0, p = 0; i < g.id.data.length; i += 4, p++){ g.id.data[i] = g.id.data[i+1] = g.id.data[i+2] = flat[p]; g.id.data[i+3] = 255; }
+  g.ctx.putImageData(g.id, 0, 0);
+  return { canvas: cv, cropped: !!box };
+}
+
+// One OCR engine instance is kept for a minute or so after use, so scanning
+// several sections doesn't reload the language data each time.
+let ocrWorker = null, ocrWorkerPromise = null, ocrIdleTimer = null, ocrLogger = null;
+async function getOcrWorker(){
+  clearTimeout(ocrIdleTimer);
+  if(ocrWorker) return ocrWorker;
+  if(!ocrWorkerPromise){
+    ocrWorkerPromise = (async ()=>{
+      const T = await loadTesseract();
+      const w = await T.createWorker('eng', 1, { logger: m => { if(ocrLogger) ocrLogger(m); } });
+      ocrWorker = w;
+      return w;
+    })().catch(e => { ocrWorkerPromise = null; throw e; });
+  }
+  return ocrWorkerPromise;
+}
+function releaseOcrWorkerSoon(){
+  clearTimeout(ocrIdleTimer);
+  ocrIdleTimer = setTimeout(async ()=>{
+    const w = ocrWorker; ocrWorker = null; ocrWorkerPromise = null;
+    if(w){ try{ await w.terminate(); }catch(e){} }
+  }, 90000);
+}
+async function ocrReceiptFile(file, label, setStatus){
+  setStatus('Loading text reader… (first scan needs internet)');
+  const worker = await getOcrWorker();
+  ocrLogger = null;
+  const img = await loadImageSource(file);
+  try{
+    const prepared = await prepareReceiptCanvas(img, worker, setStatus);
+    ocrLogger = m => { if(m.status === 'recognizing text') setStatus('Reading ' + label + '\u2026 ' + Math.round(m.progress * 100) + '%'); };
+    // A cropped receipt is one block of text; an uncropped photo needs layout analysis.
+    await worker.setParameters({ tessedit_pageseg_mode: prepared.cropped ? '6' : '3' });
+    const { data } = await worker.recognize(prepared.canvas);
+    return { text: data.text || '', cropped: prepared.cropped };
+  } finally {
+    ocrLogger = null;
+    if(img.close) img.close();
+  }
 }
 
 const MONTH_NAMES = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
@@ -867,7 +1014,7 @@ function toTitleCase(s){
 // list (the first word of each name) are added on top of these.
 const KNOWN_BRANDS = ['Coles','Woolworths','Aldi','IGA','Bunnings','Kmart','Target','Big W','Chemist Warehouse','Priceline','Officeworks','Harris Farm','Costco','Dan Murphy\'s','BWS','Liquorland','7-Eleven','Caltex','Ampol','Shell','United Petroleum','Metro Petroleum','Spotlight','Anaconda','Rebel','JB Hi-Fi','Bing Lee','Myer','David Jones','Uniqlo','Cotton On','Daiso','McDonald\'s','KFC','Hungry Jack\'s','Subway','Domino\'s','Red Rooster','Guzman y Gomez','Oporto','Starbucks','Muffin Break','Reject Shop','Telstra','Optus','Vodafone','Amazon'];
 const BRAND_STOP = ['the','and','mr','mrs','dr','new','special','transfer','recharge','amex','visa','cash'];
-const GENERIC_WORDS = /\b(pty|ltd|limited|australia|aust|supermarkets?|stores?|group|retail|inc|tax|invoice|abn|the)\b/gi;
+const GENERIC_WORDS = /\b(pty|ltd|limited|austral\w*|aust|supermarkets?|wholesale|stores?|group|retail|inc|tax|invoice|abn|the)\b/gi;
 
 function normTokens(s){ return s.toLowerCase().replace(/[^a-z0-9]+/g,' ').trim().split(' ').filter(Boolean); }
 function editDistance(a, b){
@@ -907,7 +1054,7 @@ function findReceiptBrand(text, merchants){
 // "Store: 761 - CS WEST PENNANT HILL" -> "West Pennant Hill"
 function parseStoreLocation(lines, brand){
   for(const line of lines){
-    const m = line.match(/^\s*store\s*(?:no\.?|#)?\s*[:\-]\s*(.+)$/i);   // not "Store Manager:"
+    const m = line.match(/(?:^|\s)store\s*(?:no\.?|#)?\s*[:\-]\s*(.+)$/i);   // not "Store Manager:"; tolerates smudge marks before it
     if(!m) continue;
     let v = m[1].replace(/^\s*\d+\s*[-\u2013:]?\s*/, '').replace(/[^A-Za-z0-9 &'\-]/g,' ');
     let words = v.split(/\s+/).filter(Boolean);
@@ -945,6 +1092,17 @@ function parseReceiptVendor(text, merchants){
     const loc = parseStoreLocation(lines, brand);
     if(loc) return { vendor: brandName + ' ' + loc, fromMerchant: false };
     const bt = normTokens(brand).join(' ');
+    // A line that is just the brand and a place ("COSTCO AUBURN"), skipping
+    // the legal-name header ("... Pty Ltd").
+    const placeLine = lines.find(l => {
+      const t = normTokens(l);
+      return t.length >= 2 && t.length <= 4 && (' ' + t.join(' ') + ' ').startsWith(' ' + bt + ' ') &&
+             !/\d|pty|ltd|wholesale|austral|invoice|supermarket/i.test(l) && /^[A-Za-z &'\-]+$/.test(l);
+    });
+    if(placeLine){
+      const p = placeLine.replace(/\s+/g,' ').trim();
+      return { vendor: p === p.toUpperCase() ? smartTitle(p) : p, fromMerchant: false };
+    }
     const headerLine = lines.slice(0, 12).find(l => (' ' + normTokens(l).join(' ') + ' ').includes(' ' + bt + ' '));
     if(headerLine){
       let cleaned = headerLine.replace(GENERIC_WORDS, ' ').replace(/[^A-Za-z0-9 &'\-]/g,' ').replace(/\s+/g,' ').trim();
@@ -970,6 +1128,73 @@ function parseReceiptVendor(text, merchants){
   }
   return null;
 }
+// Every amount printed on a total or payment line (TOTAL, EFT, VISA, PURCHASE
+// AUD ... all repeat the same figure on a real receipt).
+function receiptAmountCandidates(text){
+  const num = /\d{1,3}(?:,\d{3})+\.\d{2}|\d+\.\d{2}/g;
+  const wantTotal = /\b(total|amount\s+due|balance\s+due|amount\s+payable|to\s+pay|grand\s+total)\b/i;
+  const wantPay = /\b(purchase|eft|eftpos|electronic|visa|mastercard|master\s*card|amex|american\s+express|aud)\b/i;
+  const skip = /sub\s*-?\s*total|saving|excl|items|change|gst\s+(?:included|amount)|round|points|discount|tendered|received|surcharge|cash\b/i;
+  const out = [];
+  text.split('\n').forEach(line => {
+    if(skip.test(line)) return;
+    const isTotal = wantTotal.test(line);
+    if(!isTotal && !wantPay.test(line)) return;
+    (line.match(num) || []).forEach(v => out.push({ v: parseFloat(v.replace(/,/g,'')), isTotal }));
+  });
+  return out;
+}
+// Digits OCR commonly mixes up. Used only to repair a total that the items
+// confirm — never on its own.
+const DIGIT_CONFUSIONS = { '0':['8','6'], '1':['7'], '2':['7'], '3':['8','5'], '4':['9'], '5':['6','3','8'], '6':['8','5','0','4'], '7':['1','2'], '8':['6','3','0','9'], '9':['8','4'] };
+function amountVariants(v){
+  const s = v.toFixed(2).replace('.', '');
+  const out = [];
+  for(let i = 0; i < s.length; i++){
+    (DIGIT_CONFUSIONS[s[i]] || []).forEach(d => {
+      const t = s.slice(0, i) + d + s.slice(i + 1);
+      out.push(parseFloat(t.slice(0, -2) + '.' + t.slice(-2)));
+    });
+  }
+  return out;
+}
+// Decide the receipt's total using the item list as a checksum. Preference:
+// a candidate the items add up to; else a candidate that is one confusable
+// digit away from a figure the items add up to (a misread like 360.65 ->
+// 380.65 or 340.65); else the most-repeated candidate; else the largest number.
+function analyseReceipt(text, merchants, today){
+  const vendor = parseReceiptVendor(text, merchants);
+  const date = parseReceiptDate(text, today);
+  const cands = receiptAmountCandidates(text);
+  let amount = null, items = null, corrected = null;
+  if(cands.length){
+    const votes = new Map();
+    cands.forEach(c => { const k = c.v.toFixed(2); const e = votes.get(k) || { v: c.v, n: 0, total: false }; e.n++; e.total = e.total || c.isTotal; votes.set(k, e); });
+    const ranked = [...votes.values()].sort((a, b) => b.n - a.n || (b.total - a.total) || b.v - a.v);
+    for(const cand of ranked){
+      const r = parseReceiptItems(text, cand.v);
+      if(r.matches && r.items.length >= 1){ amount = { amount: cand.v, fromTotalLine: true }; items = r; break; }
+    }
+    if(!amount){
+      outer: for(const cand of ranked){
+        for(const alt of amountVariants(cand.v)){
+          const r = parseReceiptItems(text, alt);
+          if(r.matches && r.items.length >= 3){ amount = { amount: alt, fromTotalLine: true, corrected: { from: cand.v, to: alt } }; items = r; break outer; }
+        }
+      }
+    }
+    if(!amount){
+      amount = { amount: ranked[0].v, fromTotalLine: true };
+      items = parseReceiptItems(text, amount.amount);
+    }
+  } else {
+    const all = (text.match(/\d{1,3}(?:,\d{3})+\.\d{2}|\d+\.\d{2}/g) || []).map(v => parseFloat(v.replace(/,/g,'')));
+    if(all.length) amount = { amount: Math.max(...all), fromTotalLine: false };
+    items = parseReceiptItems(text, amount ? amount.amount : null);
+  }
+  return { vendor, date, amount, items };
+}
+
 function parseReceiptText(text, merchants, today){
   return {
     vendor: parseReceiptVendor(text, merchants),
@@ -995,20 +1220,39 @@ function smartTitle(s){
 function parseReceiptItems(text, total){
   // Price at the end of a line. Handles "$-1.60", "-$1.60", "1.60-", a "$"
   // the OCR read as "S", and trailing tax flags like "*".
-  const priceRe = /^(.*?)\s+(-?)\s*[$S]?\s*(-?)(\d{1,3}(?:,\d{3})*\.\d{2}|\d+\.\d{2})(-?)\s*[A-Za-z*#]{0,3}\s*$/;
-  const skip = /\b(sub\s*-?\s*total|total|gst|tax|change|cash|eftpos|eft|visa|mastercard|master\s*card|amex|american\s+express|debit|credit|round(?:ing)?|tendered|received|balance|amount\s+due|savings|points|abn|tel|phone|invoice|thank|approved|terminal|merchant|surcharge)\b|www\.|\.com/i;
+  const priceRe = /^(.*?)\s+(-?)\s*[$S]?\s*(-?)(\d{1,3}(?:,\d{3})*\.\d{2}|\d+\.\d{2})(-?)\s*[A-Za-z*#&]{0,3}\s*$/;
+  // Costco-style: product name on one line, then "CODE 3x unit line" below it.
+  // Tolerates the OCR's stray marks: a misread quantity ("Nx", "Fx", "Ix" for 1x), a leading ":", and up to three short junk tokens after the price ("-8&", "|", "ye", "3").
+  const codeRe = /(?:^|[\s:|])(\d{4,8})\s+(\d+|[A-Za-z|])\s*[xX]\s+(\d+\.\d{2})\s+(\d+\.\d{2})(-?)(?:\s*\S{1,3}){0,3}\s*$/;
+  const strongDiscount = /^(?:discount:\s*)?tpd\b|instant\s+saving/i;
+  const skip = /\b(sub\s*-?\s*total|total|gst|tax|change|cash|eftpos|eft|electronic|tnd|visa|mastercard|master\s*card|amex|american\s+express|debit|credit|round(?:ing)?|tendered|received|balance|amount\s+due|savings|points|abn|tel|phone|invoice|thank|approved|declined|terminal|merchant|surcharge|purchase|aud)\b|www\.|\.com/i;
   const tidy = s => s.replace(/^[A-Za-z]\s+(?=[A-Za-z0-9])/, '')            // stray OCR letter before the name ("Z Coles ...")
                      .replace(/^(?=[A-Za-z]{2}\s+[A-Z]{3})(?=\S*[a-z])[A-Za-z]{2}\s+/, '')   // lowercase noise before a CAPS name ("wf COLES ...")
                      .replace(/^\d{4,}\s+/, '')                               // product code
-                     .replace(/[^A-Za-z0-9 &'\-\.\/%$]/g,' ').replace(/\s+/g,' ').trim();
+                     .replace(/[^A-Za-z0-9 &'\-\.\/%$]/g,' ').replace(/\s+/g,' ').trim()
+                     .replace(/(?<=[A-Z0-9]{3,})\s+[a-z]{1,2}$/, '');   // stray lowercase mark after a CAPS name
   const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
   // Items sit above the first TOTAL line; stop there so payment details are ignored.
-  let end = lines.findIndex(l => /\btotal\b/i.test(l) && !/sub\s*-?\s*total|saving/i.test(l));
+  // A real TOTAL line carries an amount ("Total for 4 items: $15.70"); a bare
+  // "TOTAL NUMBER OF ITEMS SOLD = 10" mid-list (Costco) must not end the list.
+  // Card-slip data (TID/MID/RRN/AUTH...) also marks the end of the items.
+  let end = lines.findIndex(l => (/\btotal\b/i.test(l) && /\d+\.\d{2}/.test(l) && !/sub\s*-?\s*total|saving|excl|items\s+sold/i.test(l)) ||
+                                  /^\s*(tid|mid|rrn|stan|aid|arqc|tvr|apsn)\b|customer\s+copy|date\s*\/\s*time/i.test(l));
   if(end < 0) end = lines.length;
   const region = lines.slice(0, end);
   const items = [];
   let pending = null;
   for(const line of region){
+    const cm = line.match(codeRe);
+    if(cm){
+      let price = parseFloat(cm[4]);
+      const name = pending ? smartTitle(pending) : 'Item ' + cm[1];
+      const negative = cm[5] === '-' || strongDiscount.test(name);
+      const q = /^\d+$/.test(cm[2]) ? parseInt(cm[2], 10) : 1;
+      items.push({ n: negative && !/^discount/i.test(name) ? 'Discount: ' + name : name, q: negative ? 1 : q, p: negative ? -price : price });
+      pending = null;
+      continue;
+    }
     const m = line.match(priceRe);
     if(!m){
       // "2 @ $3.30 EACH" printed UNDER an item with no price of its own:
@@ -1069,6 +1313,14 @@ function parseReceiptItems(text, total){
   if(total != null && Math.abs(sum - total) >= 0.015 && items.length <= 20){
     const promo = /\b\d+\s*F\s*\$|\b\d+\s*for\s*\$|discount|special|saving|\boff\b|promo|coupon|multi|member|offer|\bsave\b/i;
     const pos = items.map((it, i) => i).filter(i => items[i].p > 0);
+    // Lines that are unmistakably discounts (Costco "TPD ...") are flipped all
+    // at once if that makes the items add up, however many there are.
+    const strongIdx = pos.filter(i => strongDiscount.test(items[i].n));
+    if(strongIdx.length && Math.abs(sum - 2 * strongIdx.reduce((s, i) => s + items[i].p, 0) - total) < 0.015){
+      strongIdx.forEach(i => { items[i].p = -Math.abs(items[i].p); if(!/^discount/i.test(items[i].n)) items[i].n = 'Discount: ' + items[i].n; flipped.push(items[i].n); });
+      sum = round2(items.reduce((s, i) => s + i.p, 0));
+    }
+    if(Math.abs(sum - total) >= 0.015){
     const combos = [];
     const choose = (start, k, acc) => {
       if(k === 0){ combos.push(acc.slice()); return; }
@@ -1092,6 +1344,7 @@ function parseReceiptItems(text, total){
         flipped.push(items[i].n);
       });
       sum = round2(items.reduce((s,i) => s + i.p, 0));
+    }
     }
   }
   const matches = total != null && Math.abs(sum - total) < 0.015;
@@ -1205,7 +1458,23 @@ function mergeReceiptText(prev, next){
       }
     }
   }
-  if(best) return { text: A.concat(B.slice(best.j + best.tail)).join('\n'), overlap: true };
+  if(best){
+    // Both photos saw the overlapped lines. Where the two reads differ (the
+    // edge of a photo often cuts a line in half), keep the better-looking one
+    // rather than always trusting the earlier photo.
+    const quality = l => {
+      const alnum = (l.match(/[A-Za-z0-9]/g) || []).length;
+      const symbols = (l.match(/[^A-Za-z0-9\s.,:$&\-\/()]/g) || []).length;
+      const priced = /\d+\.\d{2}\s*-?\s*[&A-Za-z*#]{0,3}\s*\S{0,3}$/.test(l) ? 3 : 0;
+      return priced + alnum * 0.05 - symbols * 0.4;
+    };
+    const overlapLines = [];
+    for(let t = 0; t < best.tail; t++){
+      const a = A[best.i + t], b = B[best.j + t];
+      overlapLines.push(quality(b) > quality(a) ? b : a);
+    }
+    return { text: A.slice(0, best.i).concat(overlapLines, B.slice(best.j + best.tail)).join('\n'), overlap: true };
+  }
   return { text: A.concat(B).join('\n'), overlap: false };
 }
 
@@ -1488,16 +1757,21 @@ function viewAdd(){
     <div class="card">
       <div class="card-title">New transaction</div>
       <div id="ocr-wrap" style="margin-bottom:14px;">
-        <label for="receipt-camera" class="btn secondary" id="ocr-btn" style="display:block;text-align:center;margin:0;cursor:pointer;">&#128247; Scan receipt</label>
+        <div class="row-flex">
+          <label for="receipt-camera" class="btn secondary" id="ocr-btn" style="display:block;text-align:center;margin:0;cursor:pointer;width:auto;flex:1;">&#128247; Scan receipt</label>
+          <label for="receipt-upload" class="btn secondary" id="ocr-upload" style="display:block;text-align:center;margin:0;cursor:pointer;width:auto;flex:1;">&#128444; Upload</label>
+        </div>
         <div id="ocr-more" style="display:none;margin-top:8px;">
-          <div class="row-flex">
-            <label for="receipt-camera" class="btn" id="ocr-next" style="display:block;text-align:center;margin:0;cursor:pointer;width:auto;flex:2;">&#65291; Next section</label>
-            <button type="button" class="btn secondary" id="ocr-done" style="margin:0;width:auto;flex:1;">Done</button>
+          <div class="row-flex" style="flex-wrap:wrap;">
+            <label for="receipt-camera" class="btn" id="ocr-next" style="display:block;text-align:center;margin:0;cursor:pointer;width:auto;flex:1 1 45%;">&#65291; Next section</label>
+            <label for="receipt-upload" class="btn" id="ocr-upload-next" style="display:block;text-align:center;margin:0;cursor:pointer;width:auto;flex:1 1 45%;">&#128444; Add from gallery</label>
+            <button type="button" class="btn secondary" id="ocr-done" style="margin:0;width:100%;flex:1 1 100%;">Done</button>
           </div>
-          <div class="helptext" style="margin-top:6px;">Long receipt? Photograph the next part, overlapping the last couple of lines. Each section is joined on. Make any edits after the final section, since adding one re-reads the whole receipt.</div>
+          <div class="helptext" style="margin-top:6px;">Long receipt? Photograph or upload the next part, overlapping the last couple of lines. Each section is joined on. Make any edits after the final section, since adding one re-reads the whole receipt.</div>
         </div>
         <input type="file" id="receipt-camera" accept="image/*" capture="environment" style="display:none;">
-        <div id="ocr-hint" class="helptext" style="margin-top:8px;">Long receipt? Scan it in overlapping sections, top to bottom \u2014 after the first photo you can add the next part.</div>
+        <input type="file" id="receipt-upload" accept="image/*" multiple style="display:none;">
+        <div id="ocr-hint" class="helptext" style="margin-top:8px;">Scan with the camera, or upload photos or screenshots you already have (pick several for a long receipt). Long receipt? Add it in overlapping sections, top to bottom.</div>
         <div id="ocr-status" class="helptext" style="margin-top:8px;"></div>
       </div>
       ${itemsEditorHtml('ai', true)}
@@ -2458,7 +2732,9 @@ function attachHandlers(){
     // "Scan receipt" always starts a fresh scan; "Next section" continues the
     // current one. Set before the camera opens; read when the photo arrives.
     document.getElementById('ocr-btn')?.addEventListener('click', ()=>{ scanAppend = false; });
+    document.getElementById('ocr-upload')?.addEventListener('click', ()=>{ scanAppend = false; });
     document.getElementById('ocr-next')?.addEventListener('click', ()=>{ scanAppend = true; });
+    document.getElementById('ocr-upload-next')?.addEventListener('click', ()=>{ scanAppend = true; });
     document.getElementById('ocr-done')?.addEventListener('click', ()=>{
       scanSession = { count: 0, text: '' };
       scanAppend = false;
@@ -2466,40 +2742,41 @@ function attachHandlers(){
       document.getElementById('ocr-hint').style.display = '';
       document.getElementById('ocr-btn').innerHTML = '&#128247; Scan receipt';
     });
-    document.getElementById('receipt-camera')?.addEventListener('change', async (event)=>{
-      const input = event.target;
-      const file = input.files && input.files[0];
-      if(!file) return;
+    // Camera and gallery inputs share one routine. A gallery pick may be
+    // several photos/screenshots at once — they're read in the order they
+    // were taken (oldest first) and joined as sections.
+    const runReceiptScan = async (fileList)=>{
+      const files = Array.from(fileList || []);
+      if(!files.length) return;
+      if(files.length > 1 && files.every(f => f.lastModified)) files.sort((a, b) => a.lastModified - b.lastModified);
       const status = document.getElementById('ocr-status');
-      const btn = document.getElementById('ocr-btn');
+      const btns = ['ocr-btn','ocr-upload','ocr-next','ocr-upload-next'].map(id => document.getElementById(id));
       const setStatus = (msg, isErr) => { status.textContent = msg; status.style.color = isErr ? 'var(--alert)' : ''; };
-      if(btn) btn.style.opacity = '0.6';
-      const append = scanAppend && scanSession.count > 0;
+      btns.forEach(b => { if(b) b.style.opacity = '0.6'; });
+      let append = scanAppend && scanSession.count > 0;
       scanAppend = false;
-      const sectionNo = append ? scanSession.count + 1 : 1;
+      let gaps = 0, anyRead = false;
       try{
-        setStatus('Preparing photo…');
-        let image = file;
-        try{ image = await compressReceiptImage(file); }catch(e){ /* fall back to the original photo */ }
-
-        setStatus('Loading text reader… (first scan needs internet)');
-        const T = await loadTesseract();
-        setStatus('Reading ' + (sectionNo > 1 ? 'section ' + sectionNo : 'receipt') + '… 0%');
-        const result = await T.recognize(image, 'eng', {
-          logger: m => { if(m.status === 'recognizing text') setStatus('Reading ' + (sectionNo > 1 ? 'section ' + sectionNo : 'receipt') + '… ' + Math.round(m.progress * 100) + '%'); }
-        });
-        // Join this section onto what's been read so far, then read the whole
-        // thing as one receipt (vendor/date from the top, total from the end).
-        let fullText = result.data.text || '';
-        let overlapFound = true;
-        if(append){
-          const mr = mergeReceiptText(scanSession.text, fullText);
-          fullText = mr.text;
-          overlapFound = mr.overlap;
+        for(let i = 0; i < files.length; i++){
+          const sectionNo = append ? scanSession.count + 1 : 1;
+          const label = files.length > 1 ? 'photo ' + (i + 1) + ' of ' + files.length : (sectionNo > 1 ? 'section ' + sectionNo : 'receipt');
+          const res = await ocrReceiptFile(files[i], label, setStatus);
+          // Join this section onto what's been read so far, then read the whole
+          // thing as one receipt (vendor/date from the top, total from the end).
+          let fullText = res.text;
+          if(append){
+            const mr = mergeReceiptText(scanSession.text, fullText);
+            fullText = mr.text;
+            if(!mr.overlap) gaps++;
+          }
+          scanSession.text = fullText;
+          scanSession.count = sectionNo;
+          anyRead = true;
+          append = true;
         }
-        scanSession.text = fullText;
-        scanSession.count = sectionNo;
-        const parsed = parseReceiptText(fullText, state.merchants, todayStr());
+        const sectionNo = scanSession.count;
+        const analysis = analyseReceipt(scanSession.text, state.merchants, todayStr());
+        const parsed = analysis, itemResult = analysis.items;
 
         const fill = (id, value) => {
           const el = document.getElementById(id);
@@ -2511,8 +2788,6 @@ function attachHandlers(){
           el.addEventListener('input', ()=> el.classList.remove('ocr-filled'), { once:true });
           setTimeout(()=> el.classList.remove('ocr-filled'), 6000);
         };
-        // Line items — read after the amount so they can be checked against it.
-        const itemResult = parseReceiptItems(fullText, parsed.amount ? parsed.amount.amount : null);
         addItemsRef.list = itemResult.items;
         const aiDetails = document.getElementById('ai-details');
         if(itemResult.items.length && aiDetails){
@@ -2528,18 +2803,18 @@ function attachHandlers(){
         if(parsed.vendor){ fill('f-vendor', parsed.vendor.vendor); got.push('vendor'); } else missing.push('vendor');
         if(parsed.date){ fill('f-date', parsed.date); got.push('date'); } else missing.push('date');
         if(parsed.amount){ fill('f-amount', parsed.amount.amount.toFixed(2)); got.push('amount'); } else missing.push('amount');
-
         // Refresh the items list now that the amount is filled in, so its
         // "matches / doesn't match" check has something to compare against.
         if(ITEMS_EDITORS.ai) ITEMS_EDITORS.ai.refresh();
 
         if(!got.length){
-          setStatus('Couldn\u2019t read anything useful — try again with the receipt flat, in good light, or enter it manually.', true);
+          setStatus('Couldn\u2019t read anything useful \u2014 try again with the receipt flat, in good light, or enter it manually.', true);
         } else {
-          let msg = (sectionNo > 1 ? 'Section ' + sectionNo + ' added. ' : '') + 'Filled in ' + got.join(', ') + ' — check before saving.';
-          if(append && !overlapFound) msg += ' Couldn\u2019t find where this section overlaps the last one, so lines in between may be missing \u2014 re-scan with more overlap if the items don\u2019t add up.';
+          let msg = (sectionNo > 1 ? sectionNo + ' sections joined. ' : '') + 'Filled in ' + got.join(', ') + ' \u2014 check before saving.';
+          if(gaps) msg += ' Couldn\u2019t find where ' + (gaps === 1 ? 'one section overlaps' : gaps + ' sections overlap') + ' the one before it, so lines in between may be missing \u2014 re-scan with more overlap if the items don\u2019t add up.';
           if(missing.length) msg += ' Couldn\u2019t find the ' + missing.join(' or ') + '.';
-          if(parsed.amount && !parsed.amount.fromTotalLine) msg += ' No TOTAL line yet, so the amount is just the largest figure so far \u2014 if the receipt continues, tap Next section.';
+          if(parsed.amount && parsed.amount.corrected) msg += ' The total read as $' + parsed.amount.corrected.from.toFixed(2) + ', but the items add up to $' + parsed.amount.corrected.to.toFixed(2) + ' \u2014 a misread digit \u2014 so I used that.';
+          else if(parsed.amount && !parsed.amount.fromTotalLine) msg += ' No TOTAL line yet, so the amount is just the largest figure so far \u2014 if the receipt continues, tap Next section.';
           if(itemResult.items.length){
             msg += itemResult.matches
               ? ' Found ' + itemResult.items.length + ' items that add up to the total.' + (itemResult.flipped && itemResult.flipped.length ? ' (Treated ' + itemResult.flipped.length + ' line' + (itemResult.flipped.length===1?'':'s') + ' as a discount so they match \u2014 the minus sign wasn\u2019t readable.)' : '')
@@ -2560,12 +2835,19 @@ function attachHandlers(){
       }catch(err){
         console.error('Receipt scan failed:', err);
         setStatus(navigator.onLine === false
-          ? 'You\u2019re offline — scanning needs internet the first time. Enter it manually for now.'
+          ? 'You\u2019re offline \u2014 scanning needs internet the first time. Enter it manually for now.'
           : 'Couldn\u2019t scan that photo. Please enter the details manually.', true);
       }finally{
-        if(btn) btn.style.opacity = '';
-        input.value = '';   // lets the same photo be chosen again
+        btns.forEach(b => { if(b) b.style.opacity = ''; });
+        releaseOcrWorkerSoon();
       }
+    };
+    ['receipt-camera', 'receipt-upload'].forEach(id => {
+      document.getElementById(id)?.addEventListener('change', (event)=>{
+        const picked = Array.from(event.target.files || []);
+        event.target.value = '';      // lets the same photo be chosen again
+        runReceiptScan(picked);
+      });
     });
     ['f-date','f-vendor','f-amount'].forEach(id=>{
       const el = document.getElementById(id);
