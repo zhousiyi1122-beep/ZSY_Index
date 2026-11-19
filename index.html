@@ -1059,22 +1059,37 @@ function editDistance(a, b){
 // Which retailer is this? Earliest brand mentioned on the receipt wins (the
 // header), so a card slip further down saying "AMEX" can't override it.
 // Falls back to a one-letter-slip match ("Coies" -> Coles) if nothing hits.
+// Tell-tale phrases for retailers whose name is only a logo on the receipt.
+const BRAND_ALIASES = [[/everyday\s+rewards/i, 'Woolworths']];
+// Which retailer is this? Big known retailers named on the receipt come first;
+// then tell-tale phrases; then the first words of YOUR merchants — but never a
+// word that is also the tail of another merchant (that's a suburb, like
+// "Hornsby" in "Coles Hornsby", not a brand). Earliest mention wins within a
+// tier, so a card slip further down can't override the header.
 function findReceiptBrand(text, merchants){
   const tokens = normTokens(text);
   const hay = ' ' + tokens.join(' ') + ' ';
-  const brands = KNOWN_BRANDS.slice();
+  const posOf = b => { const bt = normTokens(b).join(' '); return bt ? (isCjkToken(bt) ? hay.indexOf(bt) : hay.indexOf(' ' + bt + ' ')) : -1; };
+  const earliest = list => {
+    let best = null;
+    list.forEach(b => { const pos = posOf(b); if(pos >= 0 && (!best || pos < best.pos)) best = { name: b, pos }; });
+    return best;
+  };
+  let best = earliest(KNOWN_BRANDS);
+  if(best) return best.name;
+  for(const [re, name] of BRAND_ALIASES) if(re.test(text)) return name;
+  const nonFirst = new Set();
+  (merchants || []).forEach(m => normTokens(m.name || '').slice(1).forEach(t => nonFirst.add(t)));
+  const own = [];
   (merchants || []).forEach(m=>{
     const first = (m.name || '').split(/\s+/)[0];
-    if(first && (first.replace(/[^A-Za-z]/g,'').length >= 3 || cjkCount(first) >= 2) && !BRAND_STOP.includes(first.toLowerCase())) brands.push(first);
+    if(first && (first.replace(/[^A-Za-z]/g,'').length >= 3 || cjkCount(first) >= 2) && !BRAND_STOP.includes(first.toLowerCase()) && !nonFirst.has(normTokens(first).join(' '))) own.push(first);
   });
-  let best = null;
-  brands.forEach(b=>{
-    const bt = normTokens(b).join(' ');
-    const pos = bt ? (isCjkToken(bt) ? hay.indexOf(bt) : hay.indexOf(' ' + bt + ' ')) : -1;
-    if(pos >= 0 && (!best || pos < best.pos)) best = { name: b, pos };
-  });
+  best = earliest(own);
   if(best) return best.name;
-  brands.forEach(b=>{
+  // One-letter slips ("Coies" -> Coles).
+  const all = KNOWN_BRANDS.concat(own);
+  all.forEach(b=>{
     const bt = normTokens(b).join(' ');
     if(!bt || bt.includes(' ') || bt.length < 5) return;
     const t = tokens.find(tok => Math.abs(tok.length - bt.length) <= 1 && editDistance(tok, bt) <= 1);
@@ -1093,6 +1108,14 @@ function parseStoreLocation(lines, brand){
     if(brand) words = words.filter(w => w.toLowerCase() !== brand.toLowerCase());
     v = words.join(' ').trim();
     if((v.match(/[A-Za-z]/g) || []).length >= 3 && !/\d/.test(v)) return smartTitle(v);
+  }
+  // Woolworths-style header: a 4-digit store code then the suburb ("1294 Hornsby").
+  // Street addresses ("236 Pacific Highway") are skipped.
+  for(const line of lines.slice(0, 15)){
+    const m = line.match(/^\s*\d{4}\s+([A-Za-z][A-Za-z' ]{2,24})\s*$/);
+    if(!m) continue;
+    if(/\b(highway|hwy|road|rd|street|st|avenue|ave|drive|dr|lane|ln|place|pl|parade|pde|court|ct|boulevard|blvd|way|square|sq|crescent|cres|close|terrace|tce)\b/i.test(m[1])) continue;
+    return smartTitle(m[1].trim());
   }
   return null;
 }
@@ -1121,7 +1144,7 @@ function parseReceiptVendor(text, merchants){
   if(brand){
     // A brand that only exists in YOUR merchant list (not a big retailer with
     // many branches) and matches exactly one merchant: that's the one.
-    if(!KNOWN_BRANDS.some(b => b.toLowerCase() === brand.toLowerCase())){
+    if(isCjkToken(brand)){
       const sameBrand = (merchants || []).filter(m => !/^(transfer|recharge)\b/i.test(m.name || '') && (m.name || '').split(/\s+/)[0].toLowerCase() === brand.toLowerCase());
       if(sameBrand.length === 1) return { vendor: sameBrand[0].name, fromMerchant: true };
     }
@@ -1158,7 +1181,7 @@ function parseReceiptVendor(text, merchants){
     const cleaned = line.replace(GENERIC_WORDS, ' ').replace(/[^A-Za-z0-9\u3400-\u9fff\uf900-\ufaff &'\-\.]/g,' ').replace(/\s+/g,' ').trim();
     const letters = (cleaned.match(/[A-Za-z]/g) || []).length + cjkCount(cleaned);
     const digits = (cleaned.match(/\d/g) || []).length;
-    if(junk.test(line) || /@/.test(line) || digits > letters) continue;
+    if(junk.test(line) || /@/.test(line) || digits > letters || /\d+\.\d{2}\s*-?\s*[A-Za-z*#&]{0,3}\s*$/.test(line)) continue;
     if(!cleaned.split(' ').some(w => w.replace(/[^A-Za-z]/g,'').length >= 4 || cjkCount(w) >= 2)) continue;
     if(letters < cleaned.replace(/\s/g,'').length * 0.65) continue;
     return { vendor: cleaned === cleaned.toUpperCase() ? smartTitle(cleaned) : cleaned, fromMerchant: false };
@@ -1171,10 +1194,11 @@ function receiptAmountCandidates(text){
   const num = /\d{1,3}(?:,\d{3})+\.\d{2}|\d+\.\d{2}/g;
   const wantTotal = /\b(total|amount\s+due|balance\s+due|amount\s+payable|to\s+pay|grand\s+total)\b|\u5408\u8ba1|\u5408\u8a08|\u603b\u8ba1|\u7e3d\u8a08|\u603b\u989d|\u7e3d\u984d|\u5e94\u4ed8|\u61c9\u4ed8|\u5b9e\u4ed8|\u5be6\u4ed8|\u5e94\u6536|\u61c9\u6536/i;
   const wantPay = /\b(purchase|eft|eftpos|electronic|visa|mastercard|master\s*card|amex|american\s+express|aud)\b|\u5237\u5361|\u4fe1\u7528\u5361|\u94f6\u8054|\u9280\u806f|\u5fae\u4fe1|\u652f\u4ed8\u5b9d|\u652f\u4ed8\u5bf6/i;
-  const skip = /sub\s*-?\s*total|saving|excl|items|change|gst\s+(?:included|amount)|round|points|discount|tendered|received|surcharge|cash\b|\u5c0f\u8ba1|\u5c0f\u8a08|\u627e\u96f6|\u627e\u56de|\u73b0\u91d1|\u73fe\u91d1|\u6298\u6263|\u4f18\u60e0|\u512a\u60e0|\u79ef\u5206|\u7a4d\u5206|\u7a0e|\u7a05/i;
+  const skip = /sub\s*-?\s*total|saving|excl|items\s+sold|number\s+of\s+items|change|gst\s+(?:included|amount)|round|points|discount|tendered|received|surcharge|cash\b|\u5c0f\u8ba1|\u5c0f\u8a08|\u627e\u96f6|\u627e\u56de|\u73b0\u91d1|\u73fe\u91d1|\u6298\u6263|\u4f18\u60e0|\u512a\u60e0|\u79ef\u5206|\u7a4d\u5206|\u7a0e|\u7a05/i;
   const out = [];
   text.split('\n').forEach(line => {
     if(skip.test(line)) return;
+    if(/\bgst\b/i.test(line) && !/\bincl\.?\b/i.test(line)) return;   // "Total includes GST $0.91" is the GST, not the total
     const isTotal = wantTotal.test(line);
     if(!isTotal && !wantPay.test(line)) return;
     (line.match(num) || []).forEach(v => out.push({ v: parseFloat(v.replace(/,/g,'')), isTotal }));
@@ -1183,7 +1207,7 @@ function receiptAmountCandidates(text){
 }
 // Digits OCR commonly mixes up. Used only to repair a total that the items
 // confirm — never on its own.
-const DIGIT_CONFUSIONS = { '0':['8','6'], '1':['7'], '2':['7'], '3':['8','5'], '4':['9'], '5':['6','3','8'], '6':['8','5','0','4'], '7':['1','2'], '8':['6','3','0','9'], '9':['8','4'] };
+const DIGIT_CONFUSIONS = { '0':['8','6','9'], '1':['7'], '2':['7'], '3':['8','5'], '4':['9'], '5':['6','3','8','9'], '6':['8','5','0','4'], '7':['1','2'], '8':['6','3','0','9','5'], '9':['8','4','5','0'] };
 function amountVariants(v){
   const s = v.toFixed(2).replace('.', '');
   const out = [];
@@ -1208,26 +1232,64 @@ function analyseReceipt(text, merchants, today){
     const votes = new Map();
     cands.forEach(c => { const k = c.v.toFixed(2); const e = votes.get(k) || { v: c.v, n: 0, total: false }; e.n++; e.total = e.total || c.isTotal; votes.set(k, e); });
     const ranked = [...votes.values()].sort((a, b) => b.n - a.n || (b.total - a.total) || b.v - a.v);
+    let lenient = null;
     for(const cand of ranked){
       const r = parseReceiptItems(text, cand.v);
-      if(r.matches && r.items.length >= 1){ amount = { amount: cand.v, fromTotalLine: true }; items = r; break; }
+      if(r.items.length >= 1 && r.matches){
+        if(Math.abs(r.sum - cand.v) < 0.005){ amount = { amount: cand.v, fromTotalLine: true, votes: cand.n, isTotal: cand.total }; items = r; break; }
+        if(!lenient) lenient = { cand, r };      // within a cent or two (cash rounding)
+      }
     }
+    if(!amount && lenient){ amount = { amount: lenient.cand.v, fromTotalLine: true, votes: lenient.cand.n, isTotal: lenient.cand.total }; items = lenient.r; }
     if(!amount){
       outer: for(const cand of ranked){
         for(const alt of amountVariants(cand.v)){
           const r = parseReceiptItems(text, alt);
-          if(r.matches && r.items.length >= 3){ amount = { amount: alt, fromTotalLine: true, corrected: { from: cand.v, to: alt } }; items = r; break outer; }
+          if(Math.abs(r.sum - alt) < 0.005 && r.items.length >= 3){ amount = { amount: alt, fromTotalLine: true, votes: cand.n, isTotal: cand.total, corrected: { from: cand.v, to: alt } }; items = r; break outer; }
         }
       }
     }
     if(!amount){
-      amount = { amount: ranked[0].v, fromTotalLine: true };
+      amount = { amount: ranked[0].v, fromTotalLine: true, votes: ranked[0].n, isTotal: ranked[0].total };
       items = parseReceiptItems(text, amount.amount);
     }
   } else {
     const all = (text.match(/\d{1,3}(?:,\d{3})+\.\d{2}|\d+\.\d{2}/g) || []).map(v => parseFloat(v.replace(/,/g,'')));
     if(all.length) amount = { amount: Math.max(...all), fromTotalLine: false };
     items = parseReceiptItems(text, amount ? amount.amount : null);
+  }
+  // The printed total is read independently of the item prices, so when it's
+  // trustworthy (repeated on several lines, or on a TOTAL line) and the items
+  // still don't add up, look for the smallest repair that makes them:
+  //  (a) one item price with a confusable digit (1.75 read as 1.79), or
+  //  (b) exactly one item line whose price was unreadable — its price is what's left.
+  // Only applied when the answer is unique; the status line says what was done.
+  if(items && amount && amount.fromTotalLine && (amount.votes >= 2 || amount.isTotal) && !items.matches && items.items.length){
+    const round2 = n => Math.round(n * 100) / 100;
+    const total = amount.amount;
+    const hits = [];
+    items.items.forEach((it, i) => {
+      amountVariants(Math.abs(it.p)).forEach(v => {
+        const np = it.p < 0 ? -v : v;
+        if(Math.abs(round2(items.sum - it.p + np) - total) < 0.005 && !hits.some(h => h.i === i && h.np === np)) hits.push({ i, np });
+      });
+    });
+    if(hits.length === 1){
+      const it = items.items[hits[0].i];
+      items.priceFix = { n: it.n, from: it.p, to: hits[0].np };
+      it.p = hits[0].np;
+      items.sum = round2(items.items.reduce((s, x) => s + x.p, 0));
+      items.matches = Math.abs(items.sum - total) < 0.015;
+    } else if(!hits.length && items.unreadable && items.unreadable.length === 1){
+      const missing = round2(total - items.sum);
+      if(missing > 0.004 && missing < total){
+        const u = items.unreadable[0];
+        items.items.splice(u.idx, 0, { n: u.n, q: 1, p: missing });
+        items.inferred = { n: u.n, p: missing };
+        items.sum = round2(items.items.reduce((s, x) => s + x.p, 0));
+        items.matches = Math.abs(items.sum - total) < 0.015;
+      }
+    }
   }
   return { vendor, date, amount, items };
 }
@@ -1267,7 +1329,8 @@ function parseReceiptItems(text, total){
                      .replace(/^(?=[A-Za-z]{2}\s+[A-Z]{3})(?=\S*[a-z])[A-Za-z]{2}\s+/, '')   // lowercase noise before a CAPS name ("wf COLES ...")
                      .replace(/^\d{4,}\s+/, '')                               // product code
                      .replace(/[^A-Za-z0-9\u3400-\u9fff\uf900-\ufaff &'\-\.\/%$]/g,' ').replace(/\s+/g,' ').trim()
-                     .replace(/(?<=[A-Z0-9]{3,})\s+[a-z]{1,2}$/, '');   // stray lowercase mark after a CAPS name
+                     .replace(/(?<=[A-Z0-9]{3,})\s+[a-z]{1,2}$/, '')   // stray lowercase mark after a CAPS name
+                     .replace(/^[A-Za-z]\s+(?=[A-Za-z0-9])/, '');       // a promo symbol (^) read as a letter, once the other symbols are gone
   const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
   // Items sit above the first TOTAL line; stop there so payment details are ignored.
   // A real TOTAL line carries an amount ("Total for 4 items: $15.70"); a bare
@@ -1278,8 +1341,11 @@ function parseReceiptItems(text, total){
   if(end < 0) end = lines.length;
   const region = lines.slice(0, end);
   const items = [];
+  const unreadable = [];      // item-looking lines whose price came out as garbage
+  let seenHeader = false;
   let pending = null;
   for(const line of region){
+    if(/^\s*(description|item)\b|\u54c1\u540d/i.test(line)) seenHeader = true;
     const cm = line.match(codeRe);
     if(cm){
       let price = parseFloat(cm[4]);
@@ -1305,6 +1371,18 @@ function parseReceiptItems(text, total){
       }
       const qm = line.match(/^(\d+)\s*[@xX\u00a9]\s*[$S]?\s*(\d+\.\d{2})\s*(?:each|ea)?\s*$/i);
       if(qm && items.length){ items[items.length-1].q = parseInt(qm[1], 10); pending = null; continue; }
+      // A product name followed by a mangled price ("COLES SKIM MILK 1LITRE 108943)"):
+      // remember it so the missing price can be worked out from the total.
+      if(items.length || seenHeader){
+        const um = line.match(/^(.*\S)\s+(\S+)$/);
+        if(um && !skip.test(line) && !/^\W*(store|phone|register|date|time|served|receipt|abn|tax|description)/i.test(line) &&
+           /^[^\sA-Za-z]{3,}$/.test(um[2]) && (um[2].match(/\d/g) || []).length >= 2 &&
+           (um[1].match(/[A-Za-z]/g) || []).length + cjkCount(um[1]) * 2 >= 8 && um[1].trim().split(/\s+/).length >= 2){
+          unreadable.push({ idx: items.length, n: smartTitle(tidy(um[1])) });
+          pending = null;
+          continue;
+        }
+      }
       const letters = (line.match(/[A-Za-z]/g) || []).length + cjkCount(line);
       const digits = (line.match(/\d/g) || []).length;
       pending = (letters >= 3 && digits <= letters && !skip.test(line)) ? tidy(line) : null;
@@ -1314,6 +1392,13 @@ function parseReceiptItems(text, total){
     let namePart = m[1].trim();
     let price = parseFloat(m[4].replace(/,/g,''));
     if(m[2] === '-' || m[3] === '-' || m[5] === '-') price = -Math.abs(price);
+    // "Qty 4 @ $2.50 each   10.00": quantity detail for the product named above.
+    const qtyDetail = namePart.match(/^(?:qty\.?\s*)?(\d+)\s*[@xX]\s*[$S]?\s*\d+(?:\.\d+)?\s*(?:each|ea)?$/i);
+    if(qtyDetail && pending){
+      items.push({ n: smartTitle(pending), q: parseInt(qtyDetail[1], 10), p: price });
+      pending = null;
+      continue;
+    }
     // A detail line ("0.512 kg NET @ $3.90/kg" or "2 @ $3.00") that carries
     // the price belongs to the product named on the line above it.
     const lettersLeft = namePart.replace(/\b(kg|g|ea|net|x|per|lb|each)\b/gi,'').replace(/[^A-Za-z]/g,'');
@@ -1351,7 +1436,7 @@ function parseReceiptItems(text, total){
   let droppedTotalLine = null;
   if(total != null && items.length > 1 && Math.abs(sum - total) >= 0.015){
     const idx = items.findIndex(it => Math.abs(it.p - total) < 0.005);
-    if(idx >= 0 && Math.abs(round2(sum - items[idx].p) - total) < 0.015){
+    if(idx >= 0 && Math.abs(round2(sum - items[idx].p) - total) < 0.005){
       droppedTotalLine = items[idx].n;
       items.splice(idx, 1);
       sum = round2(items.reduce((s,i) => s + i.p, 0));
@@ -1368,7 +1453,7 @@ function parseReceiptItems(text, total){
     // Lines that are unmistakably discounts (Costco "TPD ...") are flipped all
     // at once if that makes the items add up, however many there are.
     const strongIdx = pos.filter(i => strongDiscount.test(items[i].n));
-    if(strongIdx.length && Math.abs(sum - 2 * strongIdx.reduce((s, i) => s + items[i].p, 0) - total) < 0.015){
+    if(strongIdx.length && Math.abs(sum - 2 * strongIdx.reduce((s, i) => s + items[i].p, 0) - total) < 0.005){
       strongIdx.forEach(i => { items[i].p = -Math.abs(items[i].p); if(!/^discount/i.test(items[i].n)) items[i].n = 'Discount: ' + items[i].n; flipped.push(items[i].n); });
       sum = round2(items.reduce((s, i) => s + i.p, 0));
     }
@@ -1381,7 +1466,7 @@ function parseReceiptItems(text, total){
     let found = null;
     for(let k = 1; k <= 3 && !found; k++){
       combos.length = 0; choose(0, k, []);
-      const hits = combos.filter(cb => Math.abs(sum - 2 * cb.reduce((s, i) => s + items[i].p, 0) - total) < 0.015);
+      const hits = combos.filter(cb => Math.abs(sum - 2 * cb.reduce((s, i) => s + items[i].p, 0) - total) < 0.005);
       if(hits.length === 1) found = hits[0];
       else if(hits.length > 1){
         const promoHits = hits.filter(cb => cb.every(i => promo.test(items[i].n)));
@@ -1400,7 +1485,7 @@ function parseReceiptItems(text, total){
     }
   }
   const matches = total != null && Math.abs(sum - total) < 0.015;
-  return { items, sum, matches, flipped, droppedTotalLine };
+  return { items, sum, matches, flipped, droppedTotalLine, unreadable };
 }
 
 // Editable items list. `prefix` namespaces the element ids ('ai' = Add form,
@@ -2886,6 +2971,8 @@ function attachHandlers(){
           if(missing.length) msg += ' Couldn\u2019t find the ' + missing.join(' or ') + '.';
           if(parsed.amount && parsed.amount.corrected) msg += ' The total read as $' + parsed.amount.corrected.from.toFixed(2) + ', but the items add up to $' + parsed.amount.corrected.to.toFixed(2) + ' \u2014 a misread digit \u2014 so I used that.';
           else if(parsed.amount && !parsed.amount.fromTotalLine) msg += ' No TOTAL line yet, so the amount is just the largest figure so far \u2014 if the receipt continues, tap Next section.';
+          if(itemResult.priceFix) msg += ' Corrected a likely misread price: \u201c' + itemResult.priceFix.n + '\u201d $' + Math.abs(itemResult.priceFix.from).toFixed(2) + ' \u2192 $' + Math.abs(itemResult.priceFix.to).toFixed(2) + ' so the items add up \u2014 please check it.';
+          if(itemResult.inferred) msg += ' The price of \u201c' + itemResult.inferred.n + '\u201d was unreadable, so I worked it out from the total ($' + itemResult.inferred.p.toFixed(2) + ') \u2014 please check it.';
           if(itemResult.items.length){
             msg += itemResult.matches
               ? ' Found ' + itemResult.items.length + ' items that add up to the total.' + (itemResult.droppedTotalLine ? ' (Ignored a line that looked like the total itself.)' : '') + (itemResult.flipped && itemResult.flipped.length ? ' (Treated ' + itemResult.flipped.length + ' line' + (itemResult.flipped.length===1?'':'s') + ' as a discount so they match \u2014 the minus sign wasn\u2019t readable.)' : '')
