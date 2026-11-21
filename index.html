@@ -1616,6 +1616,50 @@ function mergeReceiptText(prev, next){
   return { text: A.concat(B).join('\n'), overlap: false };
 }
 
+// Pre-select a merchant's usual payment method and category on the Add form —
+// what happens when you pick a vendor by hand, so a scanned receipt behaves
+// like a manual entry. A group is only changed if the merchant's value is one
+// of the choices actually on screen: a deleted category, or an income-only
+// category while on Expense, is skipped rather than blanking the selection.
+function applyMerchantDefaults(m, highlight){
+  const applied = {};
+  const pick = (groupId, value, key) => {
+    if(!value) return;
+    const pills = Array.from(document.querySelectorAll('#' + groupId + ' .pill'));
+    const target = pills.find(p => p.dataset.value === value && p.style.display !== 'none');
+    if(!target) return;
+    pills.forEach(p => p.classList.remove('active'));
+    target.classList.add('active');
+    if(highlight){ target.classList.add('ocr-filled'); setTimeout(()=> target.classList.remove('ocr-filled'), 6000); }
+    applied[key] = value;
+  };
+  pick('f-method-group', m.paymentMethod, 'method');
+  pick('f-category-group', m.category, 'category');
+  const section = document.getElementById('afterpay-section');
+  if(section && applied.method) section.style.display = (applied.method === 'Afterpay') ? 'block' : 'none';
+  return applied;
+}
+// Whose defaults apply to this vendor name? Your merchant of that exact name
+// if there is one; otherwise, for a new branch of a brand you already have
+// ("Coles West Pennant Hill"), whatever all your other merchants of that brand
+// agree on. A first word that's really a suburb ("Hornsby" in "Coles Hornsby")
+// doesn't count as a brand.
+function merchantDefaultsFor(vendor){
+  const exact = findMerchant(vendor);
+  if(exact) return { merchant: exact, source: exact.name };
+  const first = (vendor || '').trim().split(/\s+/)[0].toLowerCase();
+  if(first.length < 3 || BRAND_STOP.includes(first)) return null;
+  const merchants = state.merchants.filter(m => !/^(transfer|recharge)\b/i.test(m.name || ''));
+  const asTail = merchants.some(m => normTokens(m.name || '').slice(1).includes(first));
+  if(asTail) return null;
+  const same = merchants.filter(m => (m.name || '').trim().split(/\s+/)[0].toLowerCase() === first);
+  if(!same.length) return null;
+  const agreed = key => { const vals = [...new Set(same.map(m => m[key]).filter(Boolean))]; return vals.length === 1 ? vals[0] : null; };
+  const paymentMethod = agreed('paymentMethod'), category = agreed('category');
+  if(!paymentMethod && !category) return null;
+  return { merchant: { paymentMethod, category }, source: 'your other ' + same[0].name.trim().split(/\s+/)[0] + ' merchants' };
+}
+
 async function upsertMerchantFromEntry(name, category, paymentMethod){
   if(!name.trim()) return;
   if(findMerchant(name)) return;
@@ -2959,6 +3003,12 @@ function attachHandlers(){
         if(parsed.vendor){ fill('f-vendor', parsed.vendor.vendor); got.push('vendor'); } else missing.push('vendor');
         if(parsed.date){ fill('f-date', parsed.date); got.push('date'); } else missing.push('date');
         if(parsed.amount){ fill('f-amount', parsed.amount.amount.toFixed(2)); got.push('amount'); } else missing.push('amount');
+        // Same as picking the vendor by hand: use its usual payment method and category.
+        let usedDefaults = null;
+        if(parsed.vendor){
+          const defs = merchantDefaultsFor(parsed.vendor.vendor);
+          if(defs){ const a = applyMerchantDefaults(defs.merchant, true); if(a.method || a.category) usedDefaults = { a, source: defs.source }; }
+        }
         // Refresh the items list now that the amount is filled in, so its
         // "matches / doesn't match" check has something to compare against.
         if(ITEMS_EDITORS.ai) ITEMS_EDITORS.ai.refresh();
@@ -2967,6 +3017,12 @@ function attachHandlers(){
           setStatus('Couldn\u2019t read anything useful \u2014 try again with the receipt flat, in good light, or enter it manually.', true);
         } else {
           let msg = (sectionNo > 1 ? sectionNo + ' sections joined. ' : '') + 'Filled in ' + got.join(', ') + ' \u2014 check before saving.';
+          if(usedDefaults){
+            const bits = [];
+            if(usedDefaults.a.method) bits.push('payment method (' + usedDefaults.a.method + ')');
+            if(usedDefaults.a.category) bits.push('category (' + usedDefaults.a.category + ')');
+            msg += ' Used the usual ' + bits.join(' and ') + ' for ' + usedDefaults.source + '.';
+          }
           if(gaps) msg += ' Couldn\u2019t find where ' + (gaps === 1 ? 'one section overlaps' : gaps + ' sections overlap') + ' the one before it, so lines in between may be missing \u2014 re-scan with more overlap if the items don\u2019t add up.';
           if(missing.length) msg += ' Couldn\u2019t find the ' + missing.join(' or ') + '.';
           if(parsed.amount && parsed.amount.corrected) msg += ' The total read as $' + parsed.amount.corrected.from.toFixed(2) + ', but the items add up to $' + parsed.amount.corrected.to.toFixed(2) + ' \u2014 a misread digit \u2014 so I used that.';
@@ -3068,12 +3124,7 @@ function attachHandlers(){
     const vendorInput = document.getElementById('f-vendor');
     vendorInput.addEventListener('change', ()=>{
       const m = findMerchant(vendorInput.value);
-      if(m){
-        document.querySelectorAll('#f-method-group .pill').forEach(x=>x.classList.toggle('active', x.dataset.value===m.paymentMethod));
-        document.querySelectorAll('#f-category-group .pill').forEach(x=>x.classList.toggle('active', x.dataset.value===m.category));
-        const section = document.getElementById('afterpay-section');
-        if(section) section.style.display = (m.paymentMethod === 'Afterpay') ? 'block' : 'none';
-      }
+      if(m) applyMerchantDefaults(m, false);
     });
     document.getElementById('add-form').addEventListener('submit', async (e)=>{
       e.preventDefault();
