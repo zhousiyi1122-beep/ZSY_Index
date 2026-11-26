@@ -314,7 +314,7 @@ let addItemsRef = { list: [] };
 let editItemsRef = { list: [] };
 const ITEMS_EDITORS = {};
 let ocrLang = 'eng';          // 'eng' or 'eng+chi_sim'
-try{ if(localStorage.getItem('ledger_ocr_lang') === 'eng+chi_sim') ocrLang = 'eng+chi_sim'; }catch(e){}
+try{ const saved = localStorage.getItem('ledger_ocr_lang'); if(['eng+chi_sim','eng+chi_tra','eng+chi_sim+chi_tra'].includes(saved)) ocrLang = saved; }catch(e){}
 let ocrWorkerLang = null;
 let scanSession = { count: 0, text: '' };
 let scanAppend = false;
@@ -937,7 +937,7 @@ function releaseOcrWorkerSoon(){
   }, 90000);
 }
 async function ocrReceiptFile(file, label, setStatus){
-  setStatus(ocrLang === 'eng' ? 'Loading text reader… (first scan needs internet)' : 'Loading text reader + Chinese… (about 2 MB the first time, needs internet)');
+  setStatus(ocrLang === 'eng' ? 'Loading text reader… (first scan needs internet)' : 'Loading text reader + Chinese… (about 2 MB per script the first time, needs internet)');
   const worker = await getOcrWorker();
   ocrLogger = null;
   const img = await loadImageSource(file);
@@ -1028,6 +1028,7 @@ function toTitleCase(s){
 // list (the first word of each name) are added on top of these.
 const KNOWN_BRANDS = ['Coles','Woolworths','Aldi','IGA','Bunnings','Kmart','Target','Big W','Chemist Warehouse','Priceline','Officeworks','Harris Farm','Costco','Dan Murphy\'s','BWS','Liquorland','7-Eleven','Caltex','Ampol','Shell','United Petroleum','Metro Petroleum','Spotlight','Anaconda','Rebel','JB Hi-Fi','Bing Lee','Myer','David Jones','Uniqlo','Cotton On','Daiso','McDonald\'s','KFC','Hungry Jack\'s','Subway','Domino\'s','Red Rooster','Guzman y Gomez','Oporto','Starbucks','Muffin Break','Reject Shop','Telstra','Optus','Vodafone','Amazon'];
 const BRAND_STOP = ['the','and','mr','mrs','dr','new','special','transfer','recharge','amex','visa','cash'];
+const GENERIC_LEGAL = /\b(pty|ltd|limited|austral\w*|aust|inc|tax|invoice|abn)\b/gi;
 const GENERIC_WORDS = /\b(pty|ltd|limited|austral\w*|aust|supermarkets?|wholesale|stores?|group|retail|inc|tax|invoice|abn|the)\b/gi;
 
 // ---- Chinese support -------------------------------------------------------
@@ -1092,7 +1093,7 @@ function findReceiptBrand(text, merchants){
   all.forEach(b=>{
     const bt = normTokens(b).join(' ');
     if(!bt || bt.includes(' ') || bt.length < 5) return;
-    const t = tokens.find(tok => Math.abs(tok.length - bt.length) <= 1 && editDistance(tok, bt) <= 1);
+    const t = tokens.find(tok => tok[0] === bt[0] && Math.abs(tok.length - bt.length) <= 1 && editDistance(tok, bt) <= 1);
     if(t){ const pos = hay.indexOf(' ' + t + ' '); if(!best || pos < best.pos) best = { name: b, pos }; }
   });
   return best ? best.name : null;
@@ -1173,18 +1174,31 @@ function parseReceiptVendor(text, merchants){
     return { vendor: brandName, fromMerchant: false };
   }
 
-  // 3. Last resort: the first top line that looks like a real name. Needs a
-  //    proper word (4+ letters) so logo noise like "wy p" is rejected —
-  //    better to leave the field empty than fill it with rubbish.
-  const junk = /^(tax\s*invoice|invoice|receipt|abn|a\.?b\.?n|welcome|thank|tel\b|phone|ph[:.\s]|www|http|store\b|shop\s*\d|date|time|customer|copy|eftpos|order|table|register|served|cashier|manager|description|qty|item|\d|日期|地址|电话|電話|时间|時間|收银|收銀|小票|发票|發票|欢迎|谢谢|謝謝|税号|稅號|单号|單號|品名|数量|數量|单价|單價|金额|金額)/i;
-  for(const line of lines.slice(0, 10)){
-    const cleaned = line.replace(GENERIC_WORDS, ' ').replace(/[^A-Za-z0-9\u3400-\u9fff\uf900-\ufaff &'\-\.]/g,' ').replace(/\s+/g,' ').trim();
+  // 3. Last resort: the best-looking header line. Shop-type words (SUPERMARKET,
+  //    餐廳, ...) score up; "scan our WeChat" promo lines score down; a line
+  //    needs a proper word (4+ letters, or 2+ Chinese characters) so logo
+  //    noise like "wy p" is rejected — better empty than rubbish.
+  const junk = /^(tax\s*invoice|invoice|receipt|abn|a\.?b\.?n|welcome|thank|tel\b|phone|ph[:.\s]|www|http|store\b|shop\s*\d|date|time|customer|copy|eftpos|order|table|register|served|cashier|manager|description|qty|item|\d|\u65e5\u671f|\u5730\u5740|\u7535\u8bdd|\u96fb\u8a71|\u65f6\u95f4|\u6642\u9593|\u6536\u94f6|\u6536\u9280|\u5c0f\u7968|\u53d1\u7968|\u767c\u7968|\u6b22\u8fce|\u8c22\u8c22|\u8b1d\u8b1d|\u7a0e\u53f7|\u7a05\u865f|\u5355\u53f7|\u55ae\u865f|\u54c1\u540d|\u6570\u91cf|\u6578\u91cf|\u5355\u4ef7|\u55ae\u50f9|\u91d1\u989d|\u91d1\u984d)/i;
+  const shopWords = /supermarket|market|mart\b|store|shop\b|restaurant|cafe|caf\u00e9|bakery|pharmacy|chemist|kitchen|noodle|dumpling|bbq|sushi|grill|\u8d85\u5e02|\u8d85\u7d1a|\u8d85\u7ea7|\u5e02\u5834|\u5e02\u573a|\u9910\u5ef3|\u9910\u5385|\u98ef\u5e97|\u996d\u5e97|\u85e5\u623f|\u836f\u623f|\u70d8\u7119|\u997a\u5b50|\u9903\u5b50|\u7cb5|\u5ddd/i;
+  const promoWords = /\u5fae\u4fe1|\u516c\u4f17\u53f7|\u516c\u773e\u865f|\u626b|\u6383|\u5173\u6ce8|\u95dc\u6ce8|wechat|www\.|http|follow us|facebook|instagram|scan/i;
+  let bestLine = null;
+  lines.slice(0, 14).forEach((line, idx) => {
+    const cleaned = line.replace(GENERIC_LEGAL, ' ').replace(/[^A-Za-z0-9\u3400-\u9fff\uf900-\ufaff &'\-\.()]/g,' ').replace(/\s+/g,' ').trim();
     const letters = (cleaned.match(/[A-Za-z]/g) || []).length + cjkCount(cleaned);
     const digits = (cleaned.match(/\d/g) || []).length;
-    if(junk.test(line) || /@/.test(line) || digits > letters || /\d+\.\d{2}\s*-?\s*[A-Za-z*#&]{0,3}\s*$/.test(line)) continue;
-    if(!cleaned.split(' ').some(w => w.replace(/[^A-Za-z]/g,'').length >= 4 || cjkCount(w) >= 2)) continue;
-    if(letters < cleaned.replace(/\s/g,'').length * 0.65) continue;
-    return { vendor: cleaned === cleaned.toUpperCase() ? smartTitle(cleaned) : cleaned, fromMerchant: false };
+    if(junk.test(line) || /@/.test(line) || digits > letters || /\d+\.\d{2}\s*-?\s*[A-Za-z*#&]{0,3}\s*$/.test(line)) return;
+    if(!cleaned.split(' ').some(w => w.replace(/[^A-Za-z]/g,'').length >= 4 || cjkCount(w) >= 2)) return;
+    if(letters < cleaned.replace(/\s/g,'').length * 0.65) return;
+    let score = -idx * 0.05;
+    if(shopWords.test(line)) score += 3;
+    if(promoWords.test(line)) score -= 4;
+    if((cleaned.match(/\b[A-Z]{2,}\b/g) || []).length >= 2) score += 1;      // SHOUTED shop name
+    if(/\(.+\)/.test(cleaned)) score += 1;                                    // "(CASTLE MALL)" branch
+    if(score > -3 && (!bestLine || score > bestLine.score)) bestLine = { cleaned, score };
+  });
+  if(bestLine){
+    const t = bestLine.cleaned;
+    return { vendor: t === t.toUpperCase() ? smartTitle(t) : t, fromMerchant: false };
   }
   return null;
 }
@@ -1311,8 +1325,8 @@ function cleanItems(list){
 }
 function smartTitle(s){
   // Receipts shout in capitals. Tidy plain words, leave tokens with digits
-  // ("2L", "650G") alone.
-  return s.split(' ').map(w => /\d/.test(w) ? w : (w === w.toUpperCase() ? w.charAt(0) + w.slice(1).toLowerCase() : w)).join(' ');
+  // ("2L", "650G") alone, and cope with brackets ("(CASTLE" -> "(Castle").
+  return s.split(' ').map(w => /\d/.test(w) || !/[A-Za-z]/.test(w) ? w : (w === w.toUpperCase() ? w.toLowerCase().replace(/[a-z]/, ch => ch.toUpperCase()) : w)).join(' ');
 }
 // Pulls line items out of the OCR text. Anything it gets wrong can be fixed
 // by hand afterwards — the items-vs-total check flags when something's off.
@@ -1324,7 +1338,7 @@ function parseReceiptItems(text, total){
   // Tolerates the OCR's stray marks: a misread quantity ("Nx", "Fx", "Ix" for 1x), a leading ":", and up to three short junk tokens after the price ("-8&", "|", "ye", "3").
   const codeRe = /(?:^|[\s:|])(\d{4,8})\s+(\d+|[A-Za-z|])\s*[xX]\s+(\d+\.\d{2})\s+(\d+\.\d{2})(-?)(?:\s*\S{1,3}){0,3}\s*$/;
   const strongDiscount = /^(?:discount:\s*)?tpd\b|instant\s+saving/i;
-  const skip = /\b(sub\s*-?\s*total|total|gst|tax|change|cash|eftpos|eft|electronic|tnd|visa|mastercard|master\s*card|amex|american\s+express|debit|credit|round(?:ing)?|tendered|received|balance|amount\s+due|savings|points|abn|tel|phone|invoice|thank|approved|declined|terminal|merchant|surcharge|purchase|aud)\b|www\.|\.com|\u5408\u8ba1|\u5408\u8a08|\u603b\u8ba1|\u7e3d\u8a08|\u5c0f\u8ba1|\u5c0f\u8a08|\u627e\u96f6|\u627e\u56de|\u73b0\u91d1|\u73fe\u91d1|\u5237\u5361|\u5fae\u4fe1|\u652f\u4ed8|\u7a0e|\u7a05|\u5e94\u4ed8|\u5be6\u4ed8|\u5b9e\u4ed8|\u603b\u989d|\u7e3d\u984d|\u8c22\u8c22|\u8b1d\u8b1d/i;
+  const skip = /\b(sub\s*-?\s*total|total|gst|tax|change|cash|eftpos|eft|electronic|tnd|visa|mastercard|master\s*card|amex|american\s+express|debit|credit|round(?:ing)?|tendered|received|balance|amount\s+due|savings|points|abn|tel|phone|invoice|thank|approved|declined|terminal|merchant|surcharge|purchase|aud)\b|www\.|\.com|\u5408\u8ba1|\u5408\u8a08|\u603b\u8ba1|\u7e3d\u8a08|\u5c0f\u8ba1|\u5c0f\u8a08|\u627e\u96f6|\u627e\u56de|\u73b0\u91d1|\u73fe\u91d1|\u5237\u5361|\u5fae\u4fe1|\u652f\u4ed8|\u7a0e|\u7a05|\u5e94\u4ed8|\u5be6\u4ed8|\u5b9e\u4ed8|\u603b\u989d|\u7e3d\u984d|\u8c22\u8c22|\u8b1d\u8b1d|item\s*count|items?\s*count|total\s+(?:qty|items?)|no\.?\s*of\s+items|qty\s+total|\u4ef6\u6578|\u4ef6\u6570|\u9805\u6578|\u9879\u6570/i;
   const tidy = s => s.replace(/^[A-Za-z]\s+(?=[A-Za-z0-9])/, '')            // stray OCR letter before the name ("Z Coles ...")
                      .replace(/^(?=[A-Za-z]{2}\s+[A-Z]{3})(?=\S*[a-z])[A-Za-z]{2}\s+/, '')   // lowercase noise before a CAPS name ("wf COLES ...")
                      .replace(/^\d{4,}\s+/, '')                               // product code
@@ -1341,11 +1355,39 @@ function parseReceiptItems(text, total){
   if(end < 0) end = lines.length;
   const region = lines.slice(0, end);
   const items = [];
+  // Bilingual layout (Chinese name + price, then an English description line
+  // underneath): the English is read far more reliably, so it names the item
+  // — with the Chinese in brackets only if that came out clean.
+  let descFor = null, descBuf = [];
+  const flushDesc = () => {
+    if(descFor !== null && descBuf.length && items[descFor]){
+      const en = descBuf.join(' ').replace(/\s+/g, ' ').trim();
+      const cn = items[descFor].n;
+      const garbled = /[A-Za-z]{4,}/.test(cn.replace(/\b(kg|g|ml|pk|pcs|each)\b/gi, ''));   // Latin noise among the Chinese
+      if(en.length >= 8) items[descFor].n = garbled ? en : en + ' (' + cn.replace(/\s*\/\s*kg\b/i, '').trim() + ')';
+    }
+    descFor = null; descBuf = [];
+  };
+  const cancelDesc = () => { descFor = null; descBuf = []; };
+  const bilingual = cjkCount(text) >= 6;      // the receipt has real Chinese on it; English-only receipts never trigger this
   const unreadable = [];      // item-looking lines whose price came out as garbage
   let seenHeader = false;
   let pending = null;
   for(const line of region){
     if(/^\s*(description|item)\b|\u54c1\u540d/i.test(line)) seenHeader = true;
+    if(descFor !== null){
+      // A priced line ends the description — unless it's a detail line ("Qty 4 @ $2.50 each",
+      // "0.2kg @ ...", a Costco code line) that uses the unpriced line above as ITS name, in
+      // which case that line was never a description at all.
+      const pm = line.match(priceRe);
+      if(codeRe.test(line)) cancelDesc();
+      else if(pm){
+        const np = pm[1].trim().replace(/^[^A-Za-z0-9\u3400-\u9fff]+/, '');     // ignore stray marks before the text ("$ 2@")
+        const detail = /^(?:qty\.?\s*)?\d+\s*[@xX]\s*[$S]?\s*\d+(?:\.\d+)?\s*(?:each|ea)?$/i.test(np) ||
+                       (np.replace(/\b(kg|g|ea|net|x|per|lb|each)\b/gi, '').replace(/[^A-Za-z]/g, '').length < 2 && /\d/.test(np) && !cjkCount(np));
+        if(detail && !/^\d+\s*@\s*$/.test(np)) cancelDesc(); else flushDesc();
+      }
+    }
     const cm = line.match(codeRe);
     if(cm){
       let price = parseFloat(cm[4]);
@@ -1362,7 +1404,7 @@ function parseReceiptItems(text, total){
       // it's that item's quantity.
       // Preferred: work the quantity out from the unit price ("... $3.30 EACH"
       // under a 6.60 item = 2), which survives OCR garbling the "2 @" part.
-      const unitM = line.match(/(\d+\.\d{2})/);
+      const unitM = line.match(/[@$]\s*\$?\s*(\d+\.\d{2})/) || line.match(/(\d+\.\d{2})/);
       if(unitM && items.length && /\beach\b|\bea\b|@|\u00a9/i.test(line) && !/total|saving/i.test(line)){
         const last = items[items.length-1];
         const u = parseFloat(unitM[1]);
@@ -1371,6 +1413,11 @@ function parseReceiptItems(text, total){
       }
       const qm = line.match(/^(\d+)\s*[@xX\u00a9]\s*[$S]?\s*(\d+\.\d{2})\s*(?:each|ea)?\s*$/i);
       if(qm && items.length){ items[items.length-1].q = parseInt(qm[1], 10); pending = null; continue; }
+      if(descFor !== null){
+        if(/^[A-Za-z][A-Za-z0-9 .,'&\/()%\-]{4,}$/.test(line) && !/@/.test(line) && (line.match(/[A-Za-z]/g) || []).length >= 5 && !skip.test(line)){ descBuf.push(line); pending = null; continue; }
+        if(/^\d?\s*\d+\s?(?:g|kg|ml|l)$/i.test(line)){ descBuf.push(line.replace(/^\d\s+/, '')); continue; }      // wrapped size ("360g")
+        flushDesc();
+      }
       // A product name followed by a mangled price ("COLES SKIM MILK 1LITRE 108943)"):
       // remember it so the missing price can be worked out from the total.
       if(items.length || seenHeader){
@@ -1403,7 +1450,11 @@ function parseReceiptItems(text, total){
     // the price belongs to the product named on the line above it.
     const lettersLeft = namePart.replace(/\b(kg|g|ea|net|x|per|lb|each)\b/gi,'').replace(/[^A-Za-z]/g,'');
     if(lettersLeft.length < 2 && /\d/.test(namePart) && !cjkCount(namePart)){
-      if(!pending){ continue; }
+      if(!pending){
+        const nq = namePart.replace(/^[^A-Za-z0-9\u3400-\u9fff]+/, '').match(/^(\d+)\s*@\s*$/);
+        if(nq && items.length && Math.abs(parseInt(nq[1], 10) * price - items[items.length-1].p) < 0.02) items[items.length-1].q = parseInt(nq[1], 10);
+        continue;
+      }
       let q = 1, name = pending;
       const mult = namePart.match(/^(\d+)\s*[xX@]/);
       const weight = namePart.match(/^(\d+(?:\.\d+)?)\s*(kg|g)\b/i);
@@ -1426,8 +1477,10 @@ function parseReceiptItems(text, total){
     // Make discounts obvious in the list.
     if(price < 0 && !/discount|special|saving|\boff\b|promo|coupon|multi|\u4f18\u60e0|\u512a\u60e0|\u6298\u6263/i.test(namePart)) namePart = 'Discount: ' + namePart;
     items.push({ n: smartTitle(namePart), q, p: price });
+    if(bilingual || cjkCount(m[1]) > 0){ descFor = items.length - 1; descBuf = []; }
     pending = null;
   }
+  flushDesc();
   const round2 = n => Math.round(n * 100) / 100;
   let sum = round2(items.reduce((s,i) => s + i.p, 0));
   const flipped = [];
@@ -1958,9 +2011,11 @@ function viewAdd(){
           <div class="helptext" style="margin-bottom:4px;">Receipt language</div>
           <div class="pill-group" id="ocr-lang-group">
             <div class="pill${ocrLang==='eng'?' active':''}" data-value="eng">English</div>
-            <div class="pill${ocrLang==='eng+chi_sim'?' active':''}" data-value="eng+chi_sim">English + &#20013;&#25991;</div>
+            <div class="pill${ocrLang==='eng+chi_sim'?' active':''}" data-value="eng+chi_sim">+ &#31616;&#20307;</div>
+            <div class="pill${ocrLang==='eng+chi_tra'?' active':''}" data-value="eng+chi_tra">+ &#32321;&#39636;</div>
+            <div class="pill${ocrLang==='eng+chi_sim+chi_tra'?' active':''}" data-value="eng+chi_sim+chi_tra">+ &#31616;&#20307; &amp; &#32321;&#39636;</div>
           </div>
-          <div class="helptext" id="ocr-lang-note" style="margin-top:4px;display:${ocrLang==='eng'?'none':'block'};">Chinese mode downloads about 2 MB extra the first time and reads a little slower. Use it for receipts with Chinese text; English-only receipts read best (and fastest) in English mode.</div>
+          <div class="helptext" id="ocr-lang-note" style="margin-top:4px;display:${ocrLang==='eng'?'none':'block'};">Chinese modes download about 2 MB per script the first time and read a little slower. \u7b80\u4f53 = Simplified, \u7e41\u9ad4 = Traditional (Hong Kong / Taiwan style); pick both if you're not sure. English-only receipts read best (and fastest) in English mode.</div>
         </div>
         <div id="ocr-status" class="helptext" style="margin-top:8px;"></div>
       </div>
